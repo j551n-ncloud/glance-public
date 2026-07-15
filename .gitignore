@@ -1,0 +1,6 @@
+ics-proxy/node_modules/
+mcp/node_modules/
+data/
+.env
+.mcp.json
+.DS_Store

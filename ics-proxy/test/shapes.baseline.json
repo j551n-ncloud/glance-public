@@ -1,0 +1,535 @@
+{
+  "events": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "events:array",
+      "events[].calendarItemType:string",
+      "events[].changeKey:string",
+      "events[].end:string",
+      "events[].id:string",
+      "events[].location:string",
+      "events[].start:string",
+      "events[].title:string",
+      "events[].when:string",
+      "events[]:object",
+      "todayCount:number"
+    ]
+  },
+  "ics-events": {
+    "status": 200,
+    "shape": [
+      ":array",
+      "[].end:string",
+      "[].location:string",
+      "[].start:string",
+      "[].title:string",
+      "[].uid:string",
+      "[].when:string",
+      "[]:object"
+    ]
+  },
+  "home-tasks": {
+    "status": 200,
+    "shape": [
+      ":array",
+      "[].due:null",
+      "[].start:null",
+      "[].title:string",
+      "[].uid:string",
+      "[]:object"
+    ]
+  },
+  "work-tasks": {
+    "status": 200,
+    "shape": [
+      ":array",
+      "[].due:null",
+      "[].due:string",
+      "[].start:null",
+      "[].start:string",
+      "[].title:string",
+      "[].uid:string",
+      "[]:object"
+    ]
+  },
+  "agenda": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "events:array",
+      "events[].cal:string",
+      "events[].calendarItemType:string",
+      "events[].changeKey:string",
+      "events[].end:string",
+      "events[].id:string",
+      "events[].location:string",
+      "events[].start:string",
+      "events[].title:string",
+      "events[].uid:string",
+      "events[].when:string",
+      "events[]:object",
+      "from:string",
+      "tasks.home:array",
+      "tasks.home[].due:null",
+      "tasks.home[].start:null",
+      "tasks.home[].title:string",
+      "tasks.home[].uid:string",
+      "tasks.home[]:object",
+      "tasks.work:array",
+      "tasks.work[].due:null",
+      "tasks.work[].due:string",
+      "tasks.work[].start:null",
+      "tasks.work[].start:string",
+      "tasks.work[].title:string",
+      "tasks.work[].uid:string",
+      "tasks.work[]:object",
+      "tasks:object",
+      "to:string"
+    ]
+  },
+  "free-slots": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "date:string",
+      "dayEnd:string",
+      "dayStart:string",
+      "duration:number",
+      "free:array",
+      "free[].end:string",
+      "free[].start:string",
+      "free[]:object"
+    ]
+  },
+  "search": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "events:array",
+      "events[].cal:string",
+      "events[].calendarItemType:string",
+      "events[].changeKey:string",
+      "events[].end:string",
+      "events[].id:string",
+      "events[].location:string",
+      "events[].start:string",
+      "events[].title:string",
+      "events[].when:string",
+      "events[]:object",
+      "query:string",
+      "tasks.home:array",
+      "tasks.work:array",
+      "tasks:object"
+    ]
+  },
+  "weather": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "code:number",
+      "date:string",
+      "emoji:string",
+      "hourly:array",
+      "hourly[].precipProb:number",
+      "hourly[].temp:number",
+      "hourly[].time:string",
+      "hourly[]:object",
+      "place:string",
+      "precip:number",
+      "precipProb:number",
+      "sunrise:string",
+      "sunset:string",
+      "tempMax:number",
+      "tempMin:number",
+      "text:string",
+      "windMax:number"
+    ]
+  },
+  "weather-place": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "code:number",
+      "date:string",
+      "emoji:string",
+      "hourly:array",
+      "hourly[].precipProb:number",
+      "hourly[].temp:number",
+      "hourly[].time:string",
+      "hourly[]:object",
+      "place:string",
+      "precip:number",
+      "precipProb:number",
+      "sunrise:string",
+      "sunset:string",
+      "tempMax:number",
+      "tempMin:number",
+      "text:string",
+      "windMax:number"
+    ]
+  },
+  "plan-day": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "date:string",
+      "events:array",
+      "events[].cal:string",
+      "events[].calendarItemType:string",
+      "events[].changeKey:string",
+      "events[].end:string",
+      "events[].id:string",
+      "events[].location:string",
+      "events[].start:string",
+      "events[].title:string",
+      "events[].uid:string",
+      "events[].when:string",
+      "events[]:object",
+      "free:array",
+      "free[].end:string",
+      "free[].start:string",
+      "free[]:object",
+      "tasks.home:array",
+      "tasks.home[].due:null",
+      "tasks.home[].start:null",
+      "tasks.home[].title:string",
+      "tasks.home[].uid:string",
+      "tasks.home[]:object",
+      "tasks.work:array",
+      "tasks.work[].due:null",
+      "tasks.work[].due:string",
+      "tasks.work[].start:null",
+      "tasks.work[].start:string",
+      "tasks.work[].title:string",
+      "tasks.work[].uid:string",
+      "tasks.work[]:object",
+      "tasks:object",
+      "weather.code:number",
+      "weather.date:string",
+      "weather.emoji:string",
+      "weather.hourly:array",
+      "weather.hourly[].precipProb:number",
+      "weather.hourly[].temp:number",
+      "weather.hourly[].time:string",
+      "weather.hourly[]:object",
+      "weather.place:string",
+      "weather.precip:number",
+      "weather.precipProb:number",
+      "weather.sunrise:string",
+      "weather.sunset:string",
+      "weather.tempMax:number",
+      "weather.tempMin:number",
+      "weather.text:string",
+      "weather.windMax:number",
+      "weather:object"
+    ]
+  },
+  "check-conflicts": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "conflicts:array",
+      "end:string",
+      "hasConflict:boolean",
+      "start:string"
+    ]
+  },
+  "task-triage": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "home.due_soon:array",
+      "home.no_due:array",
+      "home.no_due[].due:null",
+      "home.no_due[].start:null",
+      "home.no_due[].title:string",
+      "home.no_due[].uid:string",
+      "home.no_due[]:object",
+      "home.overdue:array",
+      "home:object",
+      "soonDays:number",
+      "today:string",
+      "work.due_soon:array",
+      "work.no_due:array",
+      "work.no_due[].due:null",
+      "work.no_due[].start:null",
+      "work.no_due[].title:string",
+      "work.no_due[].uid:string",
+      "work.no_due[]:object",
+      "work.overdue:array",
+      "work.overdue[].due:string",
+      "work.overdue[].start:string",
+      "work.overdue[].title:string",
+      "work.overdue[].uid:string",
+      "work.overdue[]:object",
+      "work:object"
+    ]
+  },
+  "deck-boards": {
+    "status": 200,
+    "shape": [
+      ":array",
+      "[].color:string",
+      "[].id:number",
+      "[].title:string",
+      "[]:object"
+    ]
+  },
+  "deck-cards": {
+    "status": 200,
+    "shape": [
+      ":array",
+      "[].board:string",
+      "[].due:null",
+      "[].id:number",
+      "[].labels:array",
+      "[].stack:string",
+      "[].title:string",
+      "[]:object"
+    ]
+  },
+  "deck-cards-due": {
+    "status": 200,
+    "shape": [
+      ":array"
+    ]
+  },
+  "strava-activities": {
+    "status": 200,
+    "shape": [
+      ":array",
+      "[].achievement_count:number",
+      "[].avg_hr:number",
+      "[].avg_speed_kmh:number",
+      "[].avg_watts:null",
+      "[].distance_km:number",
+      "[].elapsed_time:string",
+      "[].elevation_gain_m:number",
+      "[].gear_id:null",
+      "[].id:number",
+      "[].is_commute:boolean",
+      "[].is_trainer:boolean",
+      "[].kudos:number",
+      "[].max_hr:number",
+      "[].max_speed_kmh:number",
+      "[].moving_time:string",
+      "[].moving_time_s:number",
+      "[].name:string",
+      "[].pr_count:number",
+      "[].relative_effort:number",
+      "[].sport_type:string",
+      "[].start:string",
+      "[].start_local:string",
+      "[].when:string",
+      "[]:object"
+    ]
+  },
+  "strava-athlete": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "athlete_type:number",
+      "badge_type_id:number",
+      "bikes:array",
+      "bio:null",
+      "blocked:boolean",
+      "can_follow:boolean",
+      "city:string",
+      "clubs:array",
+      "country:string",
+      "created_at:string",
+      "date_preference:string",
+      "firstname:string",
+      "follower:null",
+      "follower_count:number",
+      "friend:null",
+      "friend_count:number",
+      "ftp:null",
+      "id:number",
+      "id_str:string",
+      "lastname:string",
+      "measurement_preference:string",
+      "mutual_friend_count:number",
+      "postable_clubs_count:number",
+      "premium:boolean",
+      "profile:string",
+      "profile_medium:string",
+      "resource_state:number",
+      "sex:string",
+      "shoes:array",
+      "state:string",
+      "summit:boolean",
+      "updated_at:string",
+      "username:null",
+      "weight:null"
+    ]
+  },
+  "strava-zones": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "heart_rate.custom_zones:boolean",
+      "heart_rate.zones:array",
+      "heart_rate.zones[].max:number",
+      "heart_rate.zones[].min:number",
+      "heart_rate.zones[]:object",
+      "heart_rate:object"
+    ]
+  },
+  "strava-gear": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "bikes:array",
+      "shoes:array"
+    ]
+  },
+  "strava-ytd": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "sports:array",
+      "sports[].count:number",
+      "sports[].elevation_m:number",
+      "sports[].goalKm:number",
+      "sports[].hours:number",
+      "sports[].km:number",
+      "sports[].label:string",
+      "sports[].pct:number",
+      "sports[]:object",
+      "year:number"
+    ]
+  },
+  "strava-load": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "acute:number",
+      "chronicWeekly:number",
+      "color:string",
+      "gaugePct:number",
+      "ratio:number",
+      "status:string"
+    ]
+  },
+  "strava-readiness": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "acwr:number",
+      "acwrStatus:string",
+      "color:string",
+      "daysSinceLast:number",
+      "hrv.baseline:number",
+      "hrv.value:number",
+      "hrv:object",
+      "note:string",
+      "reasons:array",
+      "reasons[]:string",
+      "recommendation:string",
+      "restingHr.baseline:number",
+      "restingHr.value:number",
+      "restingHr:object",
+      "score:number",
+      "sleepHours:number"
+    ]
+  },
+  "strava-load-vs-training": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "series:array",
+      "series[].effort:number",
+      "series[].effortPct:number",
+      "series[].key:string",
+      "series[].label:string",
+      "series[].meetingCount:number",
+      "series[].meetingHours:number",
+      "series[].meetingPct:number",
+      "series[].trainingKm:number",
+      "series[]:object",
+      "weeks:number"
+    ]
+  },
+  "strava-series": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "granularity:string",
+      "metric:string",
+      "points:array",
+      "points[].key:string",
+      "points[].label:string",
+      "points[].value:number",
+      "points[]:object",
+      "unit:string"
+    ]
+  },
+  "status": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "backends.exchange:boolean",
+      "backends.nextcloud:boolean",
+      "backends.tasksHome:boolean",
+      "backends.tasksWork:boolean",
+      "backends.weather:boolean",
+      "backends:object",
+      "caches.ews.ageSeconds:number",
+      "caches.ews.populated:boolean",
+      "caches.ews:object",
+      "caches.homeTasks.ageSeconds:number",
+      "caches.homeTasks.populated:boolean",
+      "caches.homeTasks:object",
+      "caches.ics.ageSeconds:number",
+      "caches.ics.populated:boolean",
+      "caches.ics:object",
+      "caches.strava.keys:array",
+      "caches.strava.keys[]:string",
+      "caches.strava:object",
+      "caches.weather.days:array",
+      "caches.weather.days[]:string",
+      "caches.weather:object",
+      "caches.workTasks.ageSeconds:number",
+      "caches.workTasks.populated:boolean",
+      "caches.workTasks:object",
+      "caches:object",
+      "digests.daily.configured:boolean",
+      "digests.daily.cron:string",
+      "digests.daily.enabled:boolean",
+      "digests.daily.tz:string",
+      "digests.daily:object",
+      "digests.weekly.configured:boolean",
+      "digests.weekly.cron:string",
+      "digests.weekly.enabled:boolean",
+      "digests.weekly.tz:string",
+      "digests.weekly:object",
+      "digests:object",
+      "health.configured:boolean",
+      "health.lastIngest.at:string",
+      "health.lastIngest.atLabel:string",
+      "health.lastIngest.bytes:number",
+      "health.lastIngest:object",
+      "health:object",
+      "now:string",
+      "ok:boolean",
+      "strava.configured:boolean",
+      "strava.dbActivities:number",
+      "strava.lastSync.at:string",
+      "strava.lastSync.atLabel:string",
+      "strava.lastSync.error:null",
+      "strava.lastSync.synced:number",
+      "strava.lastSync:object",
+      "strava:object",
+      "uptimeSeconds:number"
+    ]
+  },
+  "health": {
+    "status": 200,
+    "shape": [
+      ":object",
+      "ok:boolean"
+    ]
+  }
+}

@@ -1,0 +1,118 @@
+services:
+  nginx:
+    container_name: nginx
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - 8088:80
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+    environment:
+      # Rendered into /etc/nginx/nginx.conf at startup by the image's
+      # envsubst entrypoint. Only API_TOKEN is substituted; nginx's own
+      # $-variables are left untouched.
+      - API_TOKEN=${API_TOKEN}
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+    depends_on:
+      - glance
+      - ics-proxy
+      - mcp
+
+  glance:
+    container_name: glance
+    image: glanceapp/glance
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config
+      - ./assets:/app/assets
+      - /etc/localtime:/etc/localtime:ro
+      # Optionally, also mount docker socket if you want to use the docker containers widget
+      # - /var/run/docker.sock:/var/run/docker.sock:ro
+    expose:
+      - "8080"
+    environment:
+      - TZ=Europe/Berlin
+      # Weather widget location (built-in weather widget). Set WEATHER_LOCATION
+      # in .env to override; default keeps the dashboard working if it's unset.
+      - WEATHER_LOCATION=${WEATHER_LOCATION:-Berlin, Germany}
+    env_file: .env
+    # Pin external DNS resolvers to avoid intermittent "context deadline
+    # exceeded" timeouts when widgets (e.g. weather) call external APIs.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    depends_on:
+      - ics-proxy
+
+  ics-proxy:
+    container_name: ics-proxy
+    build: ./ics-proxy
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=Europe/Berlin
+      - ICS_URL=${ICS_URL}
+      - ICS_USER=${ICS_USER:-}
+      - ICS_PASS=${ICS_PASS:-}
+      - CAL_URL=${CAL_URL:-}
+      - EWS_URL=${EWS_URL:-}
+      - EWS_USER=${EWS_USER:-}
+      - EWS_PASS=${EWS_PASS:-}
+      - EWS_DOMAIN=${EWS_DOMAIN:-}
+      - TASKS_HOME_URL=${TASKS_HOME_URL:-}
+      - TASKS_WORK_URL=${TASKS_WORK_URL:-}
+      - CACHE_TTL_MS=${ICS_CACHE_TTL_MS:-300000}
+      - LIMIT=${ICS_LIMIT:-10}
+      - API_TOKEN=${API_TOKEN}
+      # Strava (read-only). Empty unless authorized; see README "Strava".
+      - STRAVA_CLIENT_ID=${STRAVA_CLIENT_ID:-}
+      - STRAVA_CLIENT_SECRET=${STRAVA_CLIENT_SECRET:-}
+      - STRAVA_REFRESH_TOKEN=${STRAVA_REFRESH_TOKEN:-}
+      - STRAVA_CACHE_TTL_MS=${STRAVA_CACHE_TTL_MS:-600000}
+      - STRAVA_GOAL_RUN_KM=${STRAVA_GOAL_RUN_KM:-0}
+      - STRAVA_GOAL_RIDE_KM=${STRAVA_GOAL_RIDE_KM:-0}
+      - STRAVA_GOAL_SWIM_KM=${STRAVA_GOAL_SWIM_KM:-0}
+      - STRAVA_DB=${STRAVA_DB:-/data/strava.db}
+      # Daily email digest (disabled unless DIGEST_ENABLED=true)
+      - DIGEST_ENABLED=${DIGEST_ENABLED:-false}
+      - DIGEST_TO=${DIGEST_TO:-}
+      - DIGEST_CRON=${DIGEST_CRON:-0 8 * * *}
+      - DIGEST_TZ=${DIGEST_TZ:-Europe/Berlin}
+      - DIGEST_PRIORITY=${DIGEST_PRIORITY:-high}
+      - WEEKLY_DIGEST_ENABLED=${WEEKLY_DIGEST_ENABLED:-false}
+      - WEEKLY_DIGEST_TO=${WEEKLY_DIGEST_TO:-}
+      - WEEKLY_DIGEST_CRON=${WEEKLY_DIGEST_CRON:-0 8 * * 1}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-465}
+      - SMTP_SECURE=${SMTP_SECURE:-true}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    expose:
+      - "3000"
+
+  mcp:
+    container_name: mcp
+    build: ./mcp
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Berlin
+      - PROXY_URL=http://ics-proxy:3000
+      - API_TOKEN=${API_TOKEN}
+      - PORT=3001
+      # OAuth resource-server (claude.ai web via Pocket ID). Empty = disabled.
+      - OIDC_ISSUER=${OIDC_ISSUER:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - PUBLIC_BASE=${PUBLIC_BASE:-}
+      - MCP_RESOURCE=${MCP_RESOURCE:-}
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    expose:
+      - "3001"
+    depends_on:
+      - ics-proxy

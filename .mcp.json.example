@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "glance": {
+      "type": "http",
+      "url": "http://localhost:8088/mcp",
+      "headers": {
+        "X-Api-Token": "<API_TOKEN from .env>"
+      }
+    }
+  }
+}

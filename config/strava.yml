@@ -1,0 +1,210 @@
+- name: Strava
+  columns:
+    - size: small
+      widgets:
+        - type: custom-api
+          title: Athlet
+          cache: 1h
+          url: http://ics-proxy:3000/strava/athlete
+          template: |
+            <div class="color-highlight size-h3">{{ .JSON.String "firstname" }} {{ .JSON.String "lastname" }}</div>
+            <div class="size-h6">{{ .JSON.String "city" }}{{ if and (.JSON.String "city") (.JSON.String "country") }}, {{ end }}{{ .JSON.String "country" }}</div>
+            {{ if .JSON.Float "weight" }}<div class="size-h6">{{ printf "%.0f" (.JSON.Float "weight") }} kg</div>{{ end }}
+
+        - type: custom-api
+          title: Zusammenfassung (30 Akt.)
+          cache: 10m
+          url: http://ics-proxy:3000/strava/stats
+          template: |
+            <div style="display:flex; justify-content:space-between; text-align:center;">
+              <div><div class="color-highlight size-h2">{{ printf "%.0f" (.JSON.Float "totals.km") }}</div><div class="size-h6">km</div></div>
+              <div><div class="color-highlight size-h2">{{ printf "%.0f" (.JSON.Float "totals.hours") }}</div><div class="size-h6">Std.</div></div>
+              <div><div class="color-highlight size-h2">{{ .JSON.Int "totals.relative_effort" }}</div><div class="size-h6">Score</div></div>
+            </div>
+            <div class="size-h6" style="margin-top:8px;">{{ .JSON.Int "totals.count" }} Aktivitäten · {{ .JSON.Int "totals.elevation_m" }} m ↑</div>
+
+        - type: custom-api
+          title: Jahresziel (YTD)
+          cache: 30m
+          url: http://ics-proxy:3000/strava/ytd
+          template: |
+            {{ if gt (len (.JSON.Array "sports")) 0 }}
+              <div class="size-h5 color-base" style="margin-bottom:6px;">{{ .JSON.Int "year" }}</div>
+              {{ range .JSON.Array "sports" }}
+                <div style="margin:12px 0;">
+                  <div style="display:flex; justify-content:space-between; align-items:baseline;">
+                    <span class="color-highlight size-h3">{{ .String "label" }}</span>
+                    <span class="size-h4">{{ printf "%.0f" (.Float "km") }} km{{ if .Int "goalKm" }} / {{ .Int "goalKm" }}{{ end }}</span>
+                  </div>
+                  {{ if .Int "goalKm" }}
+                    <div style="background:var(--color-separator); border-radius:4px; height:9px; margin-top:6px; overflow:hidden;">
+                      <div style="background:var(--color-primary); height:9px; width:{{ .Int "pct" }}%;"></div>
+                    </div>
+                  {{ end }}
+                  <div class="size-h6 color-base" style="margin-top:4px;">{{ .Int "count" }} Akt. · {{ printf "%.0f" (.Float "hours") }} h · {{ .Int "elevation_m" }} m ↑</div>
+                </div>
+              {{ end }}
+            {{ else }}
+              <p>Keine Aktivitäten dieses Jahr.</p>
+            {{ end }}
+
+        - type: custom-api
+          title: HF-Zonen (Grenzwerte)
+          cache: 1h
+          url: http://ics-proxy:3000/strava/stats
+          template: |
+            {{ if gt (len (.JSON.Array "hrZoneBoundaries")) 0 }}
+              {{ range .JSON.Array "hrZoneBoundaries" }}
+                <div style="display:flex; align-items:center; justify-content:space-between; margin:4px 0;">
+                  <span style="display:flex; align-items:center; gap:7px;">
+                    <span style="width:12px; height:12px; border-radius:3px; background:{{ .String "color" }}; display:inline-block; flex-shrink:0;"></span>
+                    <span style="color:{{ .String "color" }}; font-weight:600;">{{ .String "zone" }}</span>
+                  </span>
+                  <span class="size-h6">{{ .String "range" }} bpm</span>
+                </div>
+              {{ end }}
+            {{ else }}
+              <p>Keine Zonen gesetzt.</p>
+            {{ end }}
+
+    - size: full
+      widgets:
+        - type: custom-api
+          title: "Trainingsbelastung (Akut:Chronisch)"
+          cache: 30m
+          url: http://ics-proxy:3000/strava/load
+          template: |
+            {{ if ne (.JSON.String "status") "Keine Daten" }}
+              <div style="display:flex; align-items:baseline; gap:12px;">
+                <span style="font-size:2.4rem; font-weight:700; color:{{ .JSON.String "color" }};">{{ .JSON.Float "ratio" }}</span>
+                <span class="size-h3" style="color:{{ .JSON.String "color" }};">{{ .JSON.String "status" }}</span>
+              </div>
+              <div class="size-h6" style="margin:4px 0 12px;">Akut (7 T): {{ .JSON.Int "acute" }} · Chronisch (Ø/Woche): {{ .JSON.Int "chronicWeekly" }} · Relative Belastung</div>
+              <div style="position:relative;">
+                <div style="display:flex; height:18px; border-radius:9px; overflow:hidden;">
+                  <div style="flex:0 0 40%; background:#4a90d9;"></div>
+                  <div style="flex:0 0 25%; background:#2e9e5b;"></div>
+                  <div style="flex:0 0 10%; background:#e8913a;"></div>
+                  <div style="flex:0 0 25%; background:#d0473f;"></div>
+                </div>
+                <div style="position:absolute; top:-3px; height:24px; left:{{ .JSON.Int "gaugePct" }}%; width:3px; background:var(--color-text-highlight); transform:translateX(-50%); border-radius:2px;"></div>
+              </div>
+              <div style="display:flex; margin-top:6px; font-size:0.85rem; font-weight:600; line-height:1.1;">
+                <div style="flex:0 0 40%; text-align:center; color:#4a90d9;">Untertraining</div>
+                <div style="flex:0 0 25%; text-align:center; color:#2e9e5b;">Optimal</div>
+                <div style="flex:0 0 10%; text-align:center; color:#e8913a;">Hoch</div>
+                <div style="flex:0 0 25%; text-align:center; color:#d0473f;">Risiko</div>
+              </div>
+              <div style="display:flex; margin-top:2px; font-size:0.9rem; font-weight:600; color:var(--color-text-subdue);">
+                <div style="flex:0 0 40%; text-align:right; padding-right:2px;">0.8</div>
+                <div style="flex:0 0 25%; text-align:right; padding-right:2px;">1.3</div>
+                <div style="flex:0 0 10%; text-align:right; padding-right:2px;">1.5</div>
+                <div style="flex:0 0 25%; text-align:right; padding-right:2px;">2.0</div>
+              </div>
+            {{ else }}
+              <p>Nicht genug Trainingsdaten für eine Auswertung.</p>
+            {{ end }}
+
+        - type: custom-api
+          title: Ø Herzfrequenz
+          cache: 1d
+          url: http://ics-proxy:3000/health
+          template: |
+            <div id="sc-hr"></div>
+            <img src="x" onerror="window.__SC=window.__SC||function(wrapId,metric,color,unit){ var wrap=document.getElementById(wrapId); if(!wrap)return; var now=new Date(), PAGE=12; if(!wrap._init){ wrap._span='workouts'; wrap._wo=0; wrap._y=now.getFullYear(); wrap._m=now.getMonth()+1; wrap._init=1; } var MN=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']; var NS='http://www.w3.org/2000/svg'; function pad(n){return (n<10?'0':'')+n;} function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;} function pickLabels(d,v,minGap){ var m=d.length, set={}; if(m===0)return set; if(m<=2){for(var i=0;i<m;i++)set[i]=1;return set;} function room(i){for(var k in set){if(Math.abs(d[i].x-d[k].x)<minGap)return false;}return true;} var ex=[]; for(var i=1;i<m-1;i++){var a=v[i]-v[i-1],b=v[i]-v[i+1];if((a>=0&&b>=0&&(a>0||b>0))||(a<=0&&b<=0&&(a<0||b<0)))ex.push({i:i,p:Math.abs(a)+Math.abs(b)});} ex.sort(function(x,y){return y.p-x.p;}); for(var j=0;j<ex.length;j++){if(room(ex[j].i))set[ex[j].i]=1;} if(room(0))set[0]=1; if(room(m-1))set[m-1]=1; for(var i=1;i<m-1;i++){if(!set[i]&&room(i))set[i]=1;} return set; } function spec(){ if(wrap._span==='workouts')return{g:'activity',from:'',to:'',label:'Aktivitäten',ctl:'arrows'}; if(wrap._span==='month'){var last=new Date(wrap._y,wrap._m,0).getDate();return{g:'day',from:wrap._y+'-'+pad(wrap._m)+'-01',to:wrap._y+'-'+pad(wrap._m)+'-'+pad(last),label:MN[wrap._m-1]+' '+wrap._y,ctl:'arrows'};} if(wrap._span==='year')return{g:'month',from:wrap._y+'-01-01',to:wrap._y+'-12-31',label:''+wrap._y,ctl:'arrows'}; return{g:'year',from:'',to:'',label:'Alle Jahre',ctl:'none'}; } function atMax(){ if(wrap._span==='workouts')return wrap._wo<=0; if(wrap._span==='month')return wrap._y>now.getFullYear()||(wrap._y===now.getFullYear()&&wrap._m>=now.getMonth()+1); if(wrap._span==='year')return wrap._y>=now.getFullYear(); return true; } function shift(d){ if(wrap._span==='workouts'){wrap._wo+=(d<0?1:-1);if(wrap._wo<0)wrap._wo=0;} else if(wrap._span==='month'){wrap._m+=d;if(wrap._m<1){wrap._m=12;wrap._y--;}if(wrap._m>12){wrap._m=1;wrap._y++;}} else if(wrap._span==='year'){wrap._y+=d;} load(); } function setSpan(s){wrap._span=s;wrap._wo=0;wrap._y=now.getFullYear();wrap._m=now.getMonth()+1;load();} function draw(d){ wrap.textContent=''; var pts=(d&&d.points)||[]; var r1=document.createElement('div'); r1.style.cssText='display:flex;gap:5px;margin-bottom:6px;flex-wrap:wrap;'; [['workouts','Workouts'],['month','Monat'],['year','Jahr'],['all','Gesamt']].forEach(function(p){ var b=document.createElement('button'); b.type='button'; b.textContent=p[1]; var on=wrap._span===p[0]; b.style.cssText='border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:0.78rem;background:'+(on?'var(--color-primary)':'var(--color-widget-content-border)')+';color:'+(on?'#fff':'inherit'); b.onclick=function(){setSpan(p[0]);}; r1.appendChild(b); }); wrap.appendChild(r1); var info=spec(); var labelText=info.label; if(wrap._span==='workouts'&&pts.length)labelText=pts[0].label+' – '+pts[pts.length-1].label; var r2=document.createElement('div'); r2.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:8px;'; var prev=document.createElement('button'); prev.type='button'; prev.textContent='◀'; prev.style.cssText='border:none;background:var(--color-widget-content-border);color:inherit;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:0.8rem;'; prev.onclick=function(){shift(-1);}; var lab=document.createElement('div'); lab.textContent=labelText; lab.style.cssText='flex:1;text-align:center;font-weight:600;font-size:0.85rem;'; var dis=info.ctl==='none'||atMax(); var next=document.createElement('button'); next.type='button'; next.textContent='▶'; next.disabled=dis; next.style.cssText='border:none;background:var(--color-widget-content-border);color:inherit;border-radius:4px;padding:2px 10px;font-size:0.8rem;cursor:'+(dis?'default':'pointer')+';opacity:'+(dis?'0.3':'1'); next.onclick=function(){if(!dis)shift(1);}; if(info.ctl==='none'){prev.style.visibility='hidden';next.style.visibility='hidden';} r2.appendChild(prev); r2.appendChild(lab); r2.appendChild(next); wrap.appendChild(r2); if(!pts.length){var ep=document.createElement('p');ep.textContent='Keine Aktivitäten in diesem Zeitraum.';ep.style.cssText='color:var(--color-text-subdue);text-align:center;padding:26px 0;';wrap.appendChild(ep);return;} var W=wrap.clientWidth||320, H=180, padL=10, padR=12, padT=20, padB=22; var vals=pts.map(function(p){return p.value;}); var mx=Math.max.apply(null,vals), mn; if(metric==='hr'){mn=Math.min.apply(null,vals); var sp=(mx-mn)*0.18||5; mn-=sp; mx+=sp;} else{mn=0; mx=mx*1.12||1;} if(mx===mn)mx=mn+1; var n=pts.length, plotW=W-padL-padR, plotH=H-padT-padB; function xA(i){return n===1?padL+plotW/2:Math.round((padL+plotW*i/(n-1))*10)/10;} function yA(v){return Math.round((padT+plotH-(v-mn)/(mx-mn)*plotH)*10)/10;} var dts=pts.map(function(p,i){return{x:xA(i),y:yA(p.value),v:Math.round(p.value),l:p.label};}); var vlab=pickLabels(dts,vals,22); var dlab=pickLabels(dts,vals,40); var svg=el('svg',{viewBox:'0 0 '+W+' '+H,style:'width:100%;height:'+H+'px;display:block;'}); var gid='grad-'+wrapId; var defs=el('defs',{}); var lg=el('linearGradient',{id:gid,x1:'0',y1:'0',x2:'0',y2:'1'}); lg.appendChild(el('stop',{offset:'0','stop-color':color,'stop-opacity':'0.32'})); lg.appendChild(el('stop',{offset:'1','stop-color':color,'stop-opacity':'0.02'})); defs.appendChild(lg); svg.appendChild(defs); for(var k=0;k<=3;k++){var gy=padT+plotH*k/3;svg.appendChild(el('line',{x1:padL,y1:gy,x2:W-padR,y2:gy,stroke:'var(--color-separator)','stroke-width':'1',opacity:'0.4'}));} var ptsStr=dts.map(function(p){return p.x+','+p.y;}).join(' '); var base=padT+plotH; if(n>=2){ svg.appendChild(el('polygon',{points:dts[0].x+','+base+' '+ptsStr+' '+dts[n-1].x+','+base,fill:'url(#'+gid+')'})); svg.appendChild(el('polyline',{points:ptsStr,fill:'none',stroke:color,'stroke-width':'2.2','stroke-linejoin':'round','stroke-linecap':'round'})); } dts.forEach(function(p,i){ var last=i===n-1, vs=!!vlab[i], ds=!!dlab[i]; svg.appendChild(el('circle',{cx:p.x,cy:p.y,r:last?'3.2':(vs?'2.2':'1.4'),fill:color})); var lx=Math.max(16,Math.min(p.x,W-16)); if(vs){ var vy=Math.max(10,p.y-6); var vt=el('text',{x:lx,y:vy,'font-size':'9.5','font-weight':last?'700':'600','text-anchor':'middle',fill:last?color:'var(--color-text-highlight)'}); vt.textContent=p.v; svg.appendChild(vt); } if(ds){ var t2=el('text',{x:lx,y:H-7,'font-size':'9','text-anchor':'middle',fill:'var(--color-text-base)'}); t2.textContent=p.l; svg.appendChild(t2); } }); wrap.appendChild(svg); var sum=document.createElement('div'); sum.style.cssText='font-size:1rem;font-weight:600;color:var(--color-text-highlight);margin-top:6px;text-align:right;'; var tot=0; vals.forEach(function(v){tot+=v;}); sum.textContent=(metric==='hr'?('Ø '+Math.round(tot/n)):('Σ '+Math.round(tot)))+' '+unit; wrap.appendChild(sum); } function load(){ var s=spec(), q='/strava-api/series?metric='+metric+'&granularity='+s.g; if(s.from)q+='&from='+s.from+'&to='+s.to; if(wrap._span==='workouts')q+='&count='+PAGE+'&offset='+(wrap._wo*PAGE); fetch(q,{headers:{'X-Api-Token':'${API_TOKEN}'}}).then(function(x){return x.json();}).then(draw).catch(function(e){wrap.textContent='Fehler: '+(e.message||e);}); } load(); }; window.__SC('sc-hr','hr','var(--color-primary)','bpm'); this.remove();" style="display:none">
+
+        - type: custom-api
+          title: Aktivitäts-Score (Relative Belastung)
+          cache: 1d
+          url: http://ics-proxy:3000/health
+          template: |
+            <div id="sc-effort"></div>
+            <img src="x" onerror="window.__SC=window.__SC||function(wrapId,metric,color,unit){ var wrap=document.getElementById(wrapId); if(!wrap)return; var now=new Date(), PAGE=12; if(!wrap._init){ wrap._span='workouts'; wrap._wo=0; wrap._y=now.getFullYear(); wrap._m=now.getMonth()+1; wrap._init=1; } var MN=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']; var NS='http://www.w3.org/2000/svg'; function pad(n){return (n<10?'0':'')+n;} function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;} function pickLabels(d,v,minGap){ var m=d.length, set={}; if(m===0)return set; if(m<=2){for(var i=0;i<m;i++)set[i]=1;return set;} function room(i){for(var k in set){if(Math.abs(d[i].x-d[k].x)<minGap)return false;}return true;} var ex=[]; for(var i=1;i<m-1;i++){var a=v[i]-v[i-1],b=v[i]-v[i+1];if((a>=0&&b>=0&&(a>0||b>0))||(a<=0&&b<=0&&(a<0||b<0)))ex.push({i:i,p:Math.abs(a)+Math.abs(b)});} ex.sort(function(x,y){return y.p-x.p;}); for(var j=0;j<ex.length;j++){if(room(ex[j].i))set[ex[j].i]=1;} if(room(0))set[0]=1; if(room(m-1))set[m-1]=1; for(var i=1;i<m-1;i++){if(!set[i]&&room(i))set[i]=1;} return set; } function spec(){ if(wrap._span==='workouts')return{g:'activity',from:'',to:'',label:'Aktivitäten',ctl:'arrows'}; if(wrap._span==='month'){var last=new Date(wrap._y,wrap._m,0).getDate();return{g:'day',from:wrap._y+'-'+pad(wrap._m)+'-01',to:wrap._y+'-'+pad(wrap._m)+'-'+pad(last),label:MN[wrap._m-1]+' '+wrap._y,ctl:'arrows'};} if(wrap._span==='year')return{g:'month',from:wrap._y+'-01-01',to:wrap._y+'-12-31',label:''+wrap._y,ctl:'arrows'}; return{g:'year',from:'',to:'',label:'Alle Jahre',ctl:'none'}; } function atMax(){ if(wrap._span==='workouts')return wrap._wo<=0; if(wrap._span==='month')return wrap._y>now.getFullYear()||(wrap._y===now.getFullYear()&&wrap._m>=now.getMonth()+1); if(wrap._span==='year')return wrap._y>=now.getFullYear(); return true; } function shift(d){ if(wrap._span==='workouts'){wrap._wo+=(d<0?1:-1);if(wrap._wo<0)wrap._wo=0;} else if(wrap._span==='month'){wrap._m+=d;if(wrap._m<1){wrap._m=12;wrap._y--;}if(wrap._m>12){wrap._m=1;wrap._y++;}} else if(wrap._span==='year'){wrap._y+=d;} load(); } function setSpan(s){wrap._span=s;wrap._wo=0;wrap._y=now.getFullYear();wrap._m=now.getMonth()+1;load();} function draw(d){ wrap.textContent=''; var pts=(d&&d.points)||[]; var r1=document.createElement('div'); r1.style.cssText='display:flex;gap:5px;margin-bottom:6px;flex-wrap:wrap;'; [['workouts','Workouts'],['month','Monat'],['year','Jahr'],['all','Gesamt']].forEach(function(p){ var b=document.createElement('button'); b.type='button'; b.textContent=p[1]; var on=wrap._span===p[0]; b.style.cssText='border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:0.78rem;background:'+(on?'var(--color-primary)':'var(--color-widget-content-border)')+';color:'+(on?'#fff':'inherit'); b.onclick=function(){setSpan(p[0]);}; r1.appendChild(b); }); wrap.appendChild(r1); var info=spec(); var labelText=info.label; if(wrap._span==='workouts'&&pts.length)labelText=pts[0].label+' – '+pts[pts.length-1].label; var r2=document.createElement('div'); r2.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:8px;'; var prev=document.createElement('button'); prev.type='button'; prev.textContent='◀'; prev.style.cssText='border:none;background:var(--color-widget-content-border);color:inherit;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:0.8rem;'; prev.onclick=function(){shift(-1);}; var lab=document.createElement('div'); lab.textContent=labelText; lab.style.cssText='flex:1;text-align:center;font-weight:600;font-size:0.85rem;'; var dis=info.ctl==='none'||atMax(); var next=document.createElement('button'); next.type='button'; next.textContent='▶'; next.disabled=dis; next.style.cssText='border:none;background:var(--color-widget-content-border);color:inherit;border-radius:4px;padding:2px 10px;font-size:0.8rem;cursor:'+(dis?'default':'pointer')+';opacity:'+(dis?'0.3':'1'); next.onclick=function(){if(!dis)shift(1);}; if(info.ctl==='none'){prev.style.visibility='hidden';next.style.visibility='hidden';} r2.appendChild(prev); r2.appendChild(lab); r2.appendChild(next); wrap.appendChild(r2); if(!pts.length){var ep=document.createElement('p');ep.textContent='Keine Aktivitäten in diesem Zeitraum.';ep.style.cssText='color:var(--color-text-subdue);text-align:center;padding:26px 0;';wrap.appendChild(ep);return;} var W=wrap.clientWidth||320, H=180, padL=10, padR=12, padT=20, padB=22; var vals=pts.map(function(p){return p.value;}); var mx=Math.max.apply(null,vals), mn; if(metric==='hr'){mn=Math.min.apply(null,vals); var sp=(mx-mn)*0.18||5; mn-=sp; mx+=sp;} else{mn=0; mx=mx*1.12||1;} if(mx===mn)mx=mn+1; var n=pts.length, plotW=W-padL-padR, plotH=H-padT-padB; function xA(i){return n===1?padL+plotW/2:Math.round((padL+plotW*i/(n-1))*10)/10;} function yA(v){return Math.round((padT+plotH-(v-mn)/(mx-mn)*plotH)*10)/10;} var dts=pts.map(function(p,i){return{x:xA(i),y:yA(p.value),v:Math.round(p.value),l:p.label};}); var vlab=pickLabels(dts,vals,22); var dlab=pickLabels(dts,vals,40); var svg=el('svg',{viewBox:'0 0 '+W+' '+H,style:'width:100%;height:'+H+'px;display:block;'}); var gid='grad-'+wrapId; var defs=el('defs',{}); var lg=el('linearGradient',{id:gid,x1:'0',y1:'0',x2:'0',y2:'1'}); lg.appendChild(el('stop',{offset:'0','stop-color':color,'stop-opacity':'0.32'})); lg.appendChild(el('stop',{offset:'1','stop-color':color,'stop-opacity':'0.02'})); defs.appendChild(lg); svg.appendChild(defs); for(var k=0;k<=3;k++){var gy=padT+plotH*k/3;svg.appendChild(el('line',{x1:padL,y1:gy,x2:W-padR,y2:gy,stroke:'var(--color-separator)','stroke-width':'1',opacity:'0.4'}));} var ptsStr=dts.map(function(p){return p.x+','+p.y;}).join(' '); var base=padT+plotH; if(n>=2){ svg.appendChild(el('polygon',{points:dts[0].x+','+base+' '+ptsStr+' '+dts[n-1].x+','+base,fill:'url(#'+gid+')'})); svg.appendChild(el('polyline',{points:ptsStr,fill:'none',stroke:color,'stroke-width':'2.2','stroke-linejoin':'round','stroke-linecap':'round'})); } dts.forEach(function(p,i){ var last=i===n-1, vs=!!vlab[i], ds=!!dlab[i]; svg.appendChild(el('circle',{cx:p.x,cy:p.y,r:last?'3.2':(vs?'2.2':'1.4'),fill:color})); var lx=Math.max(16,Math.min(p.x,W-16)); if(vs){ var vy=Math.max(10,p.y-6); var vt=el('text',{x:lx,y:vy,'font-size':'9.5','font-weight':last?'700':'600','text-anchor':'middle',fill:last?color:'var(--color-text-highlight)'}); vt.textContent=p.v; svg.appendChild(vt); } if(ds){ var t2=el('text',{x:lx,y:H-7,'font-size':'9','text-anchor':'middle',fill:'var(--color-text-base)'}); t2.textContent=p.l; svg.appendChild(t2); } }); wrap.appendChild(svg); var sum=document.createElement('div'); sum.style.cssText='font-size:1rem;font-weight:600;color:var(--color-text-highlight);margin-top:6px;text-align:right;'; var tot=0; vals.forEach(function(v){tot+=v;}); sum.textContent=(metric==='hr'?('Ø '+Math.round(tot/n)):('Σ '+Math.round(tot)))+' '+unit; wrap.appendChild(sum); } function load(){ var s=spec(), q='/strava-api/series?metric='+metric+'&granularity='+s.g; if(s.from)q+='&from='+s.from+'&to='+s.to; if(wrap._span==='workouts')q+='&count='+PAGE+'&offset='+(wrap._wo*PAGE); fetch(q,{headers:{'X-Api-Token':'${API_TOKEN}'}}).then(function(x){return x.json();}).then(draw).catch(function(e){wrap.textContent='Fehler: '+(e.message||e);}); } load(); }; window.__SC('sc-effort','effort','var(--color-positive)','Score'); this.remove();" style="display:none">
+
+        - type: custom-api
+          title: Distanz
+          cache: 1d
+          url: http://ics-proxy:3000/health
+          template: |
+            <div id="sc-dist"></div>
+            <img src="x" onerror="window.__SC=window.__SC||function(wrapId,metric,color,unit){ var wrap=document.getElementById(wrapId); if(!wrap)return; var now=new Date(), PAGE=12; if(!wrap._init){ wrap._span='workouts'; wrap._wo=0; wrap._y=now.getFullYear(); wrap._m=now.getMonth()+1; wrap._init=1; } var MN=['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez']; var NS='http://www.w3.org/2000/svg'; function pad(n){return (n<10?'0':'')+n;} function el(tag,attrs){var e=document.createElementNS(NS,tag);for(var k in attrs)e.setAttribute(k,attrs[k]);return e;} function pickLabels(d,v,minGap){ var m=d.length, set={}; if(m===0)return set; if(m<=2){for(var i=0;i<m;i++)set[i]=1;return set;} function room(i){for(var k in set){if(Math.abs(d[i].x-d[k].x)<minGap)return false;}return true;} var ex=[]; for(var i=1;i<m-1;i++){var a=v[i]-v[i-1],b=v[i]-v[i+1];if((a>=0&&b>=0&&(a>0||b>0))||(a<=0&&b<=0&&(a<0||b<0)))ex.push({i:i,p:Math.abs(a)+Math.abs(b)});} ex.sort(function(x,y){return y.p-x.p;}); for(var j=0;j<ex.length;j++){if(room(ex[j].i))set[ex[j].i]=1;} if(room(0))set[0]=1; if(room(m-1))set[m-1]=1; for(var i=1;i<m-1;i++){if(!set[i]&&room(i))set[i]=1;} return set; } function spec(){ if(wrap._span==='workouts')return{g:'activity',from:'',to:'',label:'Aktivitäten',ctl:'arrows'}; if(wrap._span==='month'){var last=new Date(wrap._y,wrap._m,0).getDate();return{g:'day',from:wrap._y+'-'+pad(wrap._m)+'-01',to:wrap._y+'-'+pad(wrap._m)+'-'+pad(last),label:MN[wrap._m-1]+' '+wrap._y,ctl:'arrows'};} if(wrap._span==='year')return{g:'month',from:wrap._y+'-01-01',to:wrap._y+'-12-31',label:''+wrap._y,ctl:'arrows'}; return{g:'year',from:'',to:'',label:'Alle Jahre',ctl:'none'}; } function atMax(){ if(wrap._span==='workouts')return wrap._wo<=0; if(wrap._span==='month')return wrap._y>now.getFullYear()||(wrap._y===now.getFullYear()&&wrap._m>=now.getMonth()+1); if(wrap._span==='year')return wrap._y>=now.getFullYear(); return true; } function shift(d){ if(wrap._span==='workouts'){wrap._wo+=(d<0?1:-1);if(wrap._wo<0)wrap._wo=0;} else if(wrap._span==='month'){wrap._m+=d;if(wrap._m<1){wrap._m=12;wrap._y--;}if(wrap._m>12){wrap._m=1;wrap._y++;}} else if(wrap._span==='year'){wrap._y+=d;} load(); } function setSpan(s){wrap._span=s;wrap._wo=0;wrap._y=now.getFullYear();wrap._m=now.getMonth()+1;load();} function draw(d){ wrap.textContent=''; var pts=(d&&d.points)||[]; var r1=document.createElement('div'); r1.style.cssText='display:flex;gap:5px;margin-bottom:6px;flex-wrap:wrap;'; [['workouts','Workouts'],['month','Monat'],['year','Jahr'],['all','Gesamt']].forEach(function(p){ var b=document.createElement('button'); b.type='button'; b.textContent=p[1]; var on=wrap._span===p[0]; b.style.cssText='border:none;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:0.78rem;background:'+(on?'var(--color-primary)':'var(--color-widget-content-border)')+';color:'+(on?'#fff':'inherit'); b.onclick=function(){setSpan(p[0]);}; r1.appendChild(b); }); wrap.appendChild(r1); var info=spec(); var labelText=info.label; if(wrap._span==='workouts'&&pts.length)labelText=pts[0].label+' – '+pts[pts.length-1].label; var r2=document.createElement('div'); r2.style.cssText='display:flex;align-items:center;gap:8px;margin-bottom:8px;'; var prev=document.createElement('button'); prev.type='button'; prev.textContent='◀'; prev.style.cssText='border:none;background:var(--color-widget-content-border);color:inherit;border-radius:4px;padding:2px 10px;cursor:pointer;font-size:0.8rem;'; prev.onclick=function(){shift(-1);}; var lab=document.createElement('div'); lab.textContent=labelText; lab.style.cssText='flex:1;text-align:center;font-weight:600;font-size:0.85rem;'; var dis=info.ctl==='none'||atMax(); var next=document.createElement('button'); next.type='button'; next.textContent='▶'; next.disabled=dis; next.style.cssText='border:none;background:var(--color-widget-content-border);color:inherit;border-radius:4px;padding:2px 10px;font-size:0.8rem;cursor:'+(dis?'default':'pointer')+';opacity:'+(dis?'0.3':'1'); next.onclick=function(){if(!dis)shift(1);}; if(info.ctl==='none'){prev.style.visibility='hidden';next.style.visibility='hidden';} r2.appendChild(prev); r2.appendChild(lab); r2.appendChild(next); wrap.appendChild(r2); if(!pts.length){var ep=document.createElement('p');ep.textContent='Keine Aktivitäten in diesem Zeitraum.';ep.style.cssText='color:var(--color-text-subdue);text-align:center;padding:26px 0;';wrap.appendChild(ep);return;} var W=wrap.clientWidth||320, H=180, padL=10, padR=12, padT=20, padB=22; var vals=pts.map(function(p){return p.value;}); var mx=Math.max.apply(null,vals), mn; if(metric==='hr'){mn=Math.min.apply(null,vals); var sp=(mx-mn)*0.18||5; mn-=sp; mx+=sp;} else{mn=0; mx=mx*1.12||1;} if(mx===mn)mx=mn+1; var n=pts.length, plotW=W-padL-padR, plotH=H-padT-padB; function xA(i){return n===1?padL+plotW/2:Math.round((padL+plotW*i/(n-1))*10)/10;} function yA(v){return Math.round((padT+plotH-(v-mn)/(mx-mn)*plotH)*10)/10;} var dts=pts.map(function(p,i){return{x:xA(i),y:yA(p.value),v:Math.round(p.value),l:p.label};}); var vlab=pickLabels(dts,vals,22); var dlab=pickLabels(dts,vals,40); var svg=el('svg',{viewBox:'0 0 '+W+' '+H,style:'width:100%;height:'+H+'px;display:block;'}); var gid='grad-'+wrapId; var defs=el('defs',{}); var lg=el('linearGradient',{id:gid,x1:'0',y1:'0',x2:'0',y2:'1'}); lg.appendChild(el('stop',{offset:'0','stop-color':color,'stop-opacity':'0.32'})); lg.appendChild(el('stop',{offset:'1','stop-color':color,'stop-opacity':'0.02'})); defs.appendChild(lg); svg.appendChild(defs); for(var k=0;k<=3;k++){var gy=padT+plotH*k/3;svg.appendChild(el('line',{x1:padL,y1:gy,x2:W-padR,y2:gy,stroke:'var(--color-separator)','stroke-width':'1',opacity:'0.4'}));} var ptsStr=dts.map(function(p){return p.x+','+p.y;}).join(' '); var base=padT+plotH; if(n>=2){ svg.appendChild(el('polygon',{points:dts[0].x+','+base+' '+ptsStr+' '+dts[n-1].x+','+base,fill:'url(#'+gid+')'})); svg.appendChild(el('polyline',{points:ptsStr,fill:'none',stroke:color,'stroke-width':'2.2','stroke-linejoin':'round','stroke-linecap':'round'})); } dts.forEach(function(p,i){ var last=i===n-1, vs=!!vlab[i], ds=!!dlab[i]; svg.appendChild(el('circle',{cx:p.x,cy:p.y,r:last?'3.2':(vs?'2.2':'1.4'),fill:color})); var lx=Math.max(16,Math.min(p.x,W-16)); if(vs){ var vy=Math.max(10,p.y-6); var vt=el('text',{x:lx,y:vy,'font-size':'9.5','font-weight':last?'700':'600','text-anchor':'middle',fill:last?color:'var(--color-text-highlight)'}); vt.textContent=p.v; svg.appendChild(vt); } if(ds){ var t2=el('text',{x:lx,y:H-7,'font-size':'9','text-anchor':'middle',fill:'var(--color-text-base)'}); t2.textContent=p.l; svg.appendChild(t2); } }); wrap.appendChild(svg); var sum=document.createElement('div'); sum.style.cssText='font-size:1rem;font-weight:600;color:var(--color-text-highlight);margin-top:6px;text-align:right;'; var tot=0; vals.forEach(function(v){tot+=v;}); sum.textContent=(metric==='hr'?('Ø '+Math.round(tot/n)):('Σ '+Math.round(tot)))+' '+unit; wrap.appendChild(sum); } function load(){ var s=spec(), q='/strava-api/series?metric='+metric+'&granularity='+s.g; if(s.from)q+='&from='+s.from+'&to='+s.to; if(wrap._span==='workouts')q+='&count='+PAGE+'&offset='+(wrap._wo*PAGE); fetch(q,{headers:{'X-Api-Token':'${API_TOKEN}'}}).then(function(x){return x.json();}).then(draw).catch(function(e){wrap.textContent='Fehler: '+(e.message||e);}); } load(); }; window.__SC('sc-dist','distance','var(--color-primary)','km'); this.remove();" style="display:none">
+
+    - size: small
+      widgets:
+        - type: custom-api
+          title: HF-Zonenverteilung (letzte Aktivität mit HF)
+          cache: 10m
+          url: http://ics-proxy:3000/strava/stats
+          template: |
+            {{ if gt (len (.JSON.Array "hrPie")) 0 }}
+              <div style="display:flex; align-items:center; gap:12px;">
+                <svg viewBox="0 0 42 42" style="width:110px; height:110px; flex-shrink:0;">
+                  {{ range .JSON.Array "hrPie" }}
+                    {{ if .Bool "full" }}
+                      <circle cx="21" cy="21" r="20" fill="{{ .String "color" }}" />
+                    {{ else }}
+                      <path d="{{ .String "d" }}" fill="{{ .String "color" }}" />
+                    {{ end }}
+                  {{ end }}
+                </svg>
+                <div style="flex:1;">
+                  {{ range .JSON.Array "hrPie" }}
+                    <div style="display:flex; align-items:center; gap:6px; margin:2px 0;">
+                      <span style="width:10px; height:10px; border-radius:2px; background:{{ .String "color" }}; display:inline-block; flex-shrink:0;"></span>
+                      <span class="size-h6" style="flex:1;">{{ .String "zone" }}</span>
+                      <span class="size-h6">{{ .Int "minutes" }}m · {{ .Int "pct" }}%</span>
+                    </div>
+                  {{ end }}
+                </div>
+              </div>
+              <div class="size-h6" style="margin-top:10px;">{{ .JSON.String "hrZones.sport" }} · {{ .JSON.String "hrZones.activity" }} · {{ .JSON.String "hrZones.when" }}</div>
+            {{ else }}
+              <p>Keine Zonendaten in der letzten Aktivität mit HF.</p>
+            {{ end }}
+
+        - type: custom-api
+          title: Letzte Aktivitäten
+          cache: 10m
+          url: http://ics-proxy:3000/strava/stats
+          template: |
+            {{ if eq (len (.JSON.Array "recent")) 0 }}
+              <p>Keine Aktivitäten.</p>
+            {{ else }}
+              <ul class="list list-gap-10" style="max-height:320px; overflow-y:auto; padding-right:4px;">
+                {{ range .JSON.Array "recent" }}
+                  <li>
+                    <div class="size-h5"><a href="https://www.strava.com/activities/{{ .Int "id" }}" target="_blank" rel="noopener" class="color-highlight" style="text-decoration:underline;">{{ .String "name" }}</a></div>
+                    <div class="size-h6">{{ .String "sport_type" }} · {{ .String "when" }}</div>
+                    <div class="size-h6">
+                      {{ if .Float "distance_km" }}{{ printf "%.1f" (.Float "distance_km") }} km · {{ end }}{{ .String "moving_time" }}{{ if .Int "relative_effort" }} · Score {{ .Int "relative_effort" }}{{ end }}{{ if .Float "avg_hr" }} · {{ printf "%.0f" (.Float "avg_hr") }} bpm{{ end }}
+                    </div>
+                  </li>
+                {{ end }}
+              </ul>
+            {{ end }}
+
+        - type: custom-api
+          title: Readiness
+          cache: 30m
+          url: http://ics-proxy:3000/strava/readiness
+          template: |
+            <div style="display:flex; align-items:center; gap:14px;">
+              <div style="position:relative; width:72px; height:72px; flex-shrink:0;">
+                <svg viewBox="0 0 42 42" style="width:72px; height:72px; transform:rotate(-90deg);">
+                  <circle cx="21" cy="21" r="17" fill="none" stroke="var(--color-separator)" stroke-width="5"></circle>
+                  <circle cx="21" cy="21" r="17" fill="none" stroke="{{ .JSON.String "color" }}" stroke-width="5"
+                    stroke-dasharray="{{ .JSON.Int "score" }} 100" stroke-linecap="round"
+                    pathLength="100"></circle>
+                </svg>
+                <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:1.2rem; font-weight:700; color:{{ .JSON.String "color" }};">{{ .JSON.Int "score" }}</div>
+              </div>
+              <div>
+                <div class="size-h3" style="color:{{ .JSON.String "color" }}; font-weight:700;">{{ .JSON.String "recommendation" }}</div>
+                <div class="size-h6 color-base" style="margin-top:2px;">
+                  {{ if .JSON.Float "acwr" }}ACWR {{ .JSON.Float "acwr" }}{{ end }}{{ if .JSON.Int "daysSinceLast" }} · {{ .JSON.Int "daysSinceLast" }} T seit Training{{ end }}
+                </div>
+              </div>
+            </div>
+            {{ if .JSON.String "note" }}
+              <div class="size-h6 color-base" style="margin-top:10px; line-height:1.5;">{{ .JSON.String "note" }}</div>
+            {{ end }}

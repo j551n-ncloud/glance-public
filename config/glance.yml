@@ -1,0 +1,75 @@
+server:
+  assets-path: /app/assets
+
+auth:
+  secret-key: ${GLANCE_SECRET_KEY}
+  users:
+    admin:
+      password-hash: ${GLANCE_PASSWORD_HASH}
+
+branding:
+  hide-footer: true
+
+theme:
+  # Note: assets are cached by the browser, changes to the CSS file
+  # will not be reflected until the browser cache is cleared (Ctrl+F5)
+  custom-css-file: /assets/user.css
+  presets:
+    dark:
+      background-color: 240 8 9
+      primary-color: 43 50 70
+      positive-color: 61 66 44
+      negative-color: 0 70 70
+      contrast-multiplier: 1.1
+    light:
+      light: true
+      background-color: 220 20 96
+      primary-color: 220 60 35
+      positive-color: 140 50 35
+      negative-color: 0 70 45
+      contrast-multiplier: 1.1
+    nord:
+      background-color: 220 16 22
+      primary-color: 213 32 52
+      positive-color: 92 28 65
+      negative-color: 354 42 56
+      contrast-multiplier: 1.1
+    gruvbox:
+      background-color: 32 18 16
+      primary-color: 27 72 56
+      positive-color: 82 37 58
+      negative-color: 6 73 56
+      contrast-multiplier: 1.1
+    tokyo-night:
+      background-color: 235 18 14
+      primary-color: 217 92 76
+      positive-color: 158 55 58
+      negative-color: 355 65 65
+      contrast-multiplier: 1.1
+    strava:
+      background-color: 20 12 11
+      primary-color: 18 95 56
+      positive-color: 145 50 55
+      negative-color: 0 75 62
+      contrast-multiplier: 1.1
+    strava-light:
+      light: true
+      background-color: 28 45 98
+      primary-color: 18 92 46
+      positive-color: 145 45 33
+      negative-color: 0 72 47
+      contrast-multiplier: 1.1
+    rose-pine:
+      background-color: 249 22 13
+      primary-color: 267 57 78
+      positive-color: 189 43 60
+      negative-color: 343 76 68
+      contrast-multiplier: 1.1
+
+pages:
+  # It's not necessary to create a new file for each page and include it, you can simply
+  # put its contents here, though multiple pages are easier to manage when separated
+  - $include: home.yml
+  - $include: work.yml
+  - $include: strava.yml
+  - $include: health.yml

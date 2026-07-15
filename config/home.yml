@@ -1,0 +1,314 @@
+- name: Home
+  columns:
+    - size: small
+      widgets:
+        - type: clock
+          hour-format: 24h
+          timezones:
+            - timezone: Europe/Berlin
+              label: Berlin
+
+        - type: custom-api
+          title: Termine
+          cache: 5m
+          url: http://ics-proxy:3000/ics-events
+          template: |
+            {{ if eq (len (.JSON.Array "")) 0 }}
+              <p>Keine anstehenden Termine.</p>
+            {{ else }}
+              <ul class="list list-gap-10" style="max-height:260px; overflow-y:auto; padding-right:4px;">
+                {{ range .JSON.Array "" }}
+                  <li>
+                    <div class="color-highlight size-h4">{{ .String "title" }}</div>
+                    <div class="size-h6">{{ .String "when" }}</div>
+                    {{ if .String "location" }}
+                      <div class="text-truncate size-h6">
+                        <a href="{{ .String "location" }}" target="_blank" rel="noopener">Join</a>
+                      </div>
+                    {{ end }}
+                  </li>
+                {{ end }}
+              </ul>
+            {{ end }}
+
+        # Location comes from the WEATHER_LOCATION env (set in docker-compose,
+        # overridable via .env). Glance errors if the var is missing, so compose
+        # provides a default.
+        - type: weather
+          location: ${WEATHER_LOCATION}
+          units: metric
+          hour-format: 24h
+
+    - size: full
+      widgets:
+        - type: bookmarks
+          groups:
+            - title: Quick
+              links:
+                - title: Proxmox UI
+                  url: https://proxmox.home.example.com
+                - title: Portainer
+                  url: https://portainer.home.example.com
+                - title: Vaultwarden
+                  url: https://vault.home.example.com
+
+            - title: GitLab
+              links:
+                - title: GitLab
+                  url: https://gitlab.home.example.com
+                - title: Merge Requests
+                  url: https://gitlab.home.example.com/dashboard/merge_requests
+
+            - title: Tools
+              links:
+                - title: Grafana
+                  url: https://grafana.home.example.com
+                - title: DJ
+                  url: https://music.home.example.com
+
+            - title: Nextcloud
+              links:
+                - title: Dateien
+                  url: https://nextcloud.home.example.com/apps/files
+                - title: Kalender
+                  url: https://nextcloud.home.example.com/apps/calendar
+
+        - type: monitor
+          cache: 5m
+          title: Service Status
+          sites:
+            - title: GitLab
+              url: https://gitlab.home.example.com
+              icon: si:gitlab
+            - title: Proxmox
+              url: https://proxmox.home.example.com
+              icon: si:proxmox
+              allow-insecure: true
+            - title: Grafana
+              url: https://grafana.home.example.com
+              icon: si:grafana
+            - title: Portainer
+              url: https://portainer.home.example.com
+              icon: si:portainer
+            - title: Nextcloud
+              url: https://nextcloud.home.example.com
+              icon: si:nextcloud
+            - title: Immich
+              url: https://photos.home.example.com
+              icon: si:immich
+
+        - type: custom-api
+          title: Spotify
+          cache: 1s
+          template: |
+            <style>
+              .offline-indicator {
+                width: 8px;
+                height: 7px;
+                border-radius: 50%;
+                background-color: var(--color-negative);
+                display: inline-block;
+                margin-left: 4px;
+                vertical-align: middle;
+              }
+
+              .indicators-container {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+              }
+            </style>
+            {{
+              $tokenRes := newRequest "https://accounts.spotify.com/api/token"
+                | withHeader "Authorization" "Basic ${SPOTIFY_BTOA}"
+                | withHeader "Content-Type" "application/x-www-form-urlencoded"
+                | withStringBody "grant_type=refresh_token&refresh_token=${SPOTIFY_REFRESH}"
+                | getResponse
+            }}
+
+            {{ if eq $tokenRes.Response.StatusCode 200 }}
+              {{ $accessToken := $tokenRes.JSON.String "access_token" }}
+
+              {{ $currentlyPlaying := newRequest "https://api.spotify.com/v1/me/player"
+                  | withHeader "Authorization" (print "Bearer " $accessToken)
+                  | getResponse
+              }}
+              {{ if eq $currentlyPlaying.Response.StatusCode 204 }}
+              <div class="flex items-center">
+                <p style="margin-right:10px;">Offline</p>
+                <div class="indicators-container">
+                  <span class="offline-indicator" data-popover-type="text"
+                        data-popover-text="No current playback">
+                  </span>
+                </div>
+              </div>
+              {{ end}}
+
+              {{ $isCurrentlyPlaying := $currentlyPlaying.JSON.Bool "is_playing" }}
+              {{ $isDeviceActive := $currentlyPlaying.JSON.Bool "device.is_active" }}
+              {{ $isPrivateSession := $currentlyPlaying.JSON.Bool "device.is_private_session" }}
+              {{ $deviceName := $currentlyPlaying.JSON.String "device.name" }}
+              {{ $queueRes := newRequest "https://api.spotify.com/v1/me/player/queue"
+                  | withHeader "Authorization" (print "Bearer " $accessToken)
+                  | getResponse
+              }}
+
+              {{ if eq $queueRes.Response.StatusCode 200 }}
+                {{ $data := $queueRes.JSON }}
+                {{ $queue := $data.Array "queue" }}
+
+                {{ $artist := $data.String "currently_playing.artists.0.name" }}
+
+                {{ if gt (len $artist) 0 }}
+                <div class="size-h5">NOW PLAYING</div>
+                <div class="widget-content-frame flex flex-row items-center gap-20" style="padding: 4px; margin-top: 4px; margin-bottom: 4px;">
+                  <div>
+                    <img src="{{ $data.String "currently_playing.album.images.0.url" }}" style="border-radius: 5px; width: 5rem;" class="card">
+                  </div>
+                  <div class="flex grow flex-column justify-center pr-2">
+                    <div class="color-positive size-h4 font-bold">{{ $data.String "currently_playing.name" }}</div>
+                    <div class="size-h5">{{ $artist }}</div>
+                  </div>
+                  {{ if and $isDeviceActive (not $isPrivateSession) }}
+                    {{ if $isCurrentlyPlaying }}
+                      <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/pause',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">⏸</button>
+                        <p>{{ $deviceName }}</p>
+                      </div>
+                    {{ else }}
+                      <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/play',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">▶</button>
+                        <p>{{ $deviceName }}</p>
+                      </div>
+                    {{ end }}
+                  {{ else if $isPrivateSession }}
+                  <p style="margin-right:10px;">Private session</p>
+                  {{ else }}
+                  <p style="margin-right:10px;">Error</p>
+                  {{ end }}
+                </div>
+                {{ end }}
+
+                {{ if gt (len $queue) 0 }}
+                  <div class="size-h5 color-muted font-bold" style="margin-top: 10px;">UPCOMING:</div>
+                  {{ range $i, $track := $queue }}
+                    {{ if lt $i 5 }}
+                      <div
+                        class="widget-content-frame flex flex-row items-center gap-20"
+                        style="padding: 4px; margin-top: 4px; margin-bottom: 4px; cursor: pointer;"
+                        onclick="(function(){
+                          for (let j = 0; j < {{ add $i 1}}; j++) {
+                            fetch('https://api.spotify.com/v1/me/player/next', {
+                              method: 'POST',
+                              headers: {
+                                'Authorization': 'Bearer {{ $accessToken }}'
+                              }
+                            });
+                          }
+                          setTimeout(() => location.reload(), 2000);
+                        })()"
+                      >
+                        <div>
+                          <img src="{{ $track.String "album.images.0.url" }}" style="border-radius: 5px; width: 5rem;" class="card">
+                        </div>
+                        <div class="flex grow flex-column justify-center pr-2">
+                          <div class="color-positive size-h4 font-bold">{{ $track.String "name" }}</div>
+                          <div class="size-h5">{{ $track.String "artists.0.name" }}</div>
+                        </div>
+                      </div>
+                    {{ end }}
+                  {{ end }}
+                {{ end }}
+
+              {{ else }}
+                <p>Failed to fetch queue: {{ $queueRes.Response.Status }}</p>
+              {{ end }}
+
+            {{ else }}
+              <p>Failed to get token: {{ $tokenRes.Response.Status }}</p>
+            {{ end }}
+
+    - size: small
+      widgets:
+        - type: custom-api
+          title: To-Do
+          cache: 15s
+          url: http://ics-proxy:3000/home-tasks
+          template: |
+            {{ if eq (len (.JSON.Array "")) 0 }}
+              <p class="color-muted">Keine offenen Aufgaben.</p>
+            {{ else }}
+              <ul class="list list-gap-10" style="max-height:220px; overflow-y:auto; padding-right:4px;">
+                {{ range .JSON.Array "" }}
+                  <li style="display:flex; align-items:flex-start; gap:8px;">
+                    <input type="checkbox" style="margin-top:2px; cursor:pointer; flex-shrink:0; width:14px; height:14px;"
+                      onchange="(async function(el){
+                        if(!el.checked) return;
+                        el.disabled=true;
+                        await fetch('/tasks-api/complete-home-task',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({uid:'{{ .String "uid" }}'})});
+                        setTimeout(()=>location.reload(),500);
+                      })(this)">
+                    <div>
+                      <div class="size-h4">{{ .String "title" }}</div>
+                      {{ if .String "start" }}
+                        <div class="size-h6 color-muted">Start: {{ .String "start" }}</div>
+                      {{ end }}
+                      {{ if .String "due" }}
+                        <div class="size-h6 color-muted">Fällig: {{ .String "due" }}</div>
+                      {{ end }}
+                    </div>
+                  </li>
+                {{ end }}
+              </ul>
+            {{ end }}
+            <form style="display:flex; flex-direction:column; gap:6px; margin-top:10px;"
+              onsubmit="(async function(e){
+                e.preventDefault();
+                const f = e.target;
+                const title = f.querySelector('input[name=title]').value.trim();
+                if (!title) return;
+                const startDate = f.querySelector('input[name=startDate]').value || null;
+                const endDate = f.querySelector('input[name=endDate]').value || null;
+                await fetch('/tasks-api/home-tasks',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({title,startDate,endDate})});
+                f.reset();
+                setTimeout(()=>location.reload(),500);
+              })(event)">
+              <div style="display:flex; gap:6px;">
+                <input name="title" type="text" placeholder="Aufgabe hinzufügen…" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
+                <button type="submit" style="background:var(--color-primary); border:none; border-radius:4px; padding:4px 10px; color:#fff; cursor:pointer; font-size:1.1rem; font-weight:bold;">+</button>
+              </div>
+              <div style="display:flex; gap:6px;">
+                <input name="startDate" type="date" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
+                <input name="endDate" type="date" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
+              </div>
+            </form>
+
+        - type: server-stats
+          servers:
+            - type: local
+              name: Glance Host
+
+        - type: custom-api
+          title: Strava
+          cache: 10m
+          url: http://ics-proxy:3000/strava/activities?per_page=8
+          template: |
+            {{ if eq (len (.JSON.Array "")) 0 }}
+              <p>Keine Aktivitäten.</p>
+            {{ else }}
+              <ul class="list list-gap-10" style="max-height:260px; overflow-y:auto; padding-right:4px;">
+                {{ range .JSON.Array "" }}
+                  <li>
+                    <div class="color-highlight size-h4">{{ .String "name" }}</div>
+                    <div class="size-h6">
+                      {{ .String "sport_type" }} · {{ .String "when" }}
+                    </div>
+                    <div class="size-h6">
+                      {{ if .Float "distance_km" }}{{ printf "%.1f" (.Float "distance_km") }} km{{ end }}
+                      {{ if .String "moving_time" }} · {{ .String "moving_time" }}{{ end }}
+                      {{ if .Float "avg_hr" }} · {{ printf "%.0f" (.Float "avg_hr") }} bpm{{ end }}
+                    </div>
+                  </li>
+                {{ end }}
+              </ul>
+            {{ end }}

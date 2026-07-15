@@ -1,0 +1,301 @@
+- name: Work
+  columns:
+    - size: small
+      widgets:
+        - type: clock
+          hour-format: 24h
+          timezones:
+            - timezone: Europe/Berlin
+              label: Berlin
+
+        - type: custom-api
+          title: Termine
+          cache: 1m
+          url: http://ics-proxy:3000/events
+          template: |
+            {{ $events := .JSON.Array "events" }}
+            {{ $todayCount := .JSON.Int "todayCount" }}
+            {{ if gt $todayCount 0 }}
+              <div class="size-h6 color-highlight" style="margin-bottom:6px;">Heute: {{ $todayCount }} Termine</div>
+            {{ end }}
+            {{ if eq (len $events) 0 }}
+              <p>Keine anstehenden Termine.</p>
+            {{ else }}
+              <ul class="list list-gap-10" style="max-height:260px; overflow-y:auto; padding-right:4px;">
+                {{ range $events }}
+                  <li>
+                    {{ $title := .String "title" }}
+                    <div class="{{ if eq $title "Team Standup" }}color-muted{{ else }}color-highlight{{ end }} size-h4">{{ $title }}</div>
+                    <div class="size-h6">{{ .String "when" }}</div>
+                    {{ if .String "location" }}
+                      <div class="size-h6">
+                        <a href="{{ .String "location" }}" target="_blank" rel="noopener">Join</a>
+                      </div>
+                    {{ end }}
+                  </li>
+                {{ end }}
+              </ul>
+            {{ end }}
+
+        # Location comes from the WEATHER_LOCATION env (set in docker-compose,
+        # overridable via .env). Glance errors if the var is missing, so compose
+        # provides a default.
+        - type: weather
+          location: ${WEATHER_LOCATION}
+          units: metric
+          hour-format: 24h
+
+    - size: full
+      widgets:
+        - type: bookmarks
+          groups:
+            - title: Development
+              links:
+                - title: GitLab
+                  url: https://gitlab.intra.example.com
+                - title: Merge Requests
+                  url: https://gitlab.intra.example.com/dashboard/merge_requests
+                - title: YouTrack
+                  url: https://youtrack.intra.example.com/issues
+
+            - title: Infrastructure
+              links:
+                - title: NetBox
+                  url: https://netbox.intra.example.com
+                - title: IPAM
+                  url: https://ipam.intra.example.com/ui/
+                - title: CheckMK
+                  url: https://checkmk.intra.example.com
+                - title: pve01
+                  url: https://pve01.intra.example.com
+                - title: admin01
+                  url: ssh://user@admin01.intra.example.com
+
+            - title: Resources
+              links:
+                - title: Wiki
+                  url: https://wiki.intra.example.com
+                - title: IT Support
+                  url: https://itsupport.intra.example.com
+
+        - type: custom-api
+          title: Pomodoro
+          cache: 1d
+          url: http://ics-proxy:3000/health
+          template: |
+            <div style="text-align:center; padding:8px 0;">
+              <div id="pomo-mode" style="font-size:0.85rem; font-weight:bold; letter-spacing:0.05em; margin-bottom:6px;"></div>
+              <div id="pomo-time" style="font-size:2.8rem; font-weight:bold; font-variant-numeric:tabular-nums; line-height:1; margin-bottom:10px;"></div>
+              <div style="background:var(--color-widget-content-border); border-radius:4px; height:6px; overflow:hidden; margin-bottom:12px;">
+                <div id="pomo-bar" style="height:100%; width:0%; border-radius:4px; transition:width 1s linear;"></div>
+              </div>
+              <div style="display:flex; gap:8px; justify-content:center; margin-bottom:10px;">
+                <button id="pomo-start" onclick="_pt()" style="background:var(--color-primary); border:none; border-radius:4px; padding:5px 18px; color:#fff; cursor:pointer; font-size:inherit; font-weight:bold;">Start</button>
+                <button onclick="_prs()" style="background:var(--color-widget-content-border); border:none; border-radius:4px; padding:5px 12px; color:inherit; cursor:pointer; font-size:inherit;">Reset</button>
+                <button onclick="_psk()" style="background:var(--color-widget-content-border); border:none; border-radius:4px; padding:5px 12px; color:inherit; cursor:pointer; font-size:inherit;">Skip</button>
+              </div>
+              <div id="pomo-sess" style="font-size:1rem; letter-spacing:2px;"></div>
+            </div>
+            <img src="x" onerror="window._gs=function(){try{return JSON.parse(localStorage.getItem('pomo')||'null')}catch(e){return null}};window._ss=function(s){localStorage.setItem('pomo',JSON.stringify(s))};window._ds=function(){return{mode:'work',running:false,startedAt:null,elapsed:0,sessions:0}};window._pr=function(){var s=window._gs()||window._ds(),dur=s.mode==='work'?25*60:5*60,el=s.elapsed;if(s.running&&s.startedAt)el+=Math.floor((Date.now()-s.startedAt)/1000);el=Math.min(el,dur);var rem=dur-el,pct=Math.round(el/dur*100),work=s.mode==='work';document.getElementById('pomo-time').textContent=String(Math.floor(rem/60)).padStart(2,'0')+':'+String(rem%60).padStart(2,'0');var bar=document.getElementById('pomo-bar');bar.style.width=pct+'%';bar.style.background=work?'var(--color-positive)':'var(--color-primary)';var md=document.getElementById('pomo-mode');md.textContent=work?'Fokus':'Pause';md.style.color=work?'var(--color-positive)':'var(--color-primary)';document.getElementById('pomo-sess').textContent=Array(Math.min(s.sessions,8)).fill('🍅').join('')||'-';document.getElementById('pomo-start').textContent=s.running?'Pause':'Start';if(s.running&&rem<=0){if(Notification.permission==='granted')new Notification('Pomodoro',{body:work?'Pause! 5 Minuten.':'Los geht es! 25 Minuten Fokus.'});window._ss({mode:work?'break':'work',running:false,startedAt:null,elapsed:0,sessions:work?s.sessions+1:s.sessions});clearInterval(window._pi);window._pr()}};window._pt=function(){if(Notification.permission==='default')Notification.requestPermission();var s=window._gs()||window._ds();if(s.running){window._ss(Object.assign({},s,{running:false,startedAt:null,elapsed:s.elapsed+Math.floor((Date.now()-s.startedAt)/1000)}));clearInterval(window._pi)}else{window._ss(Object.assign({},s,{running:true,startedAt:Date.now()}));window._pi=setInterval(window._pr,1000)}window._pr()};window._prs=function(){clearInterval(window._pi);window._ss(window._ds());window._pr()};window._psk=function(){clearInterval(window._pi);var s=window._gs()||window._ds(),w=s.mode==='work';window._ss({mode:w?'break':'work',running:false,startedAt:null,elapsed:0,sessions:w?s.sessions+1:s.sessions});window._pr()};if(!window._gs())window._ss(window._ds());window._pr();if((window._gs()||{}).running)window._pi=setInterval(window._pr,1000);this.remove();" style="display:none">
+
+        - type: custom-api
+          title: Arbeitstag
+          cache: 1d
+          url: http://ics-proxy:3000/health
+          template: |
+            <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:var(--color-text-subdue); margin-bottom:4px;">
+              <span>08:00</span>
+              <span id="workday-pct">-</span>
+              <span>16:00</span>
+            </div>
+            <div style="background:var(--color-widget-content-border); border-radius:4px; height:10px; overflow:hidden;">
+              <div id="workday-bar" style="height:100%; width:0%; border-radius:4px; transition:width 0.5s;"></div>
+            </div>
+            <div id="workday-text" style="font-size:0.8rem; color:var(--color-text-subdue); margin-top:5px; text-align:center;"></div>
+            <img src="x" onerror="(function(){function u(){var now=new Date(),s=8*60,e=16*60,c=now.getHours()*60+now.getMinutes(),t=e-s,el=Math.max(0,Math.min(c-s,t)),pct=Math.round(el/t*100),rem=Math.max(0,e-c),bar=document.getElementById('workday-bar'),txt=document.getElementById('workday-text'),pctEl=document.getElementById('workday-pct');if(!bar||!txt||!pctEl)return;bar.style.width=pct+'%';if(pct<50)bar.style.background='var(--color-positive)';else if(pct<80)bar.style.background='var(--color-primary)';else bar.style.background='var(--color-negative)';pctEl.textContent=pct+'%';if(c>=e){txt.textContent='Feierabend!';}else if(c<s){var w=s-c;txt.textContent='Beginnt in '+(w>=60?Math.floor(w/60)+'h ':'')+w%60+'m';}else{var h=Math.floor(rem/60),m=rem%60;txt.textContent=(h>0?h+'h ':'')+m+'m verbleibend';}}u();setInterval(u,60000);this.remove();})();" style="display:none">
+
+    - size: small
+      widgets:
+        - type: custom-api
+          title: Work To-Do
+          cache: 15s
+          url: http://ics-proxy:3000/work-tasks
+          template: |
+            {{ if eq (len (.JSON.Array "")) 0 }}
+              <p class="color-muted">Keine offenen Aufgaben.</p>
+            {{ else }}
+              <ul class="list list-gap-10" style="max-height:220px; overflow-y:auto; padding-right:4px;">
+                {{ range .JSON.Array "" }}
+                  <li style="display:flex; align-items:flex-start; gap:8px;">
+                    <input type="checkbox" style="margin-top:2px; cursor:pointer; flex-shrink:0; width:14px; height:14px;"
+                      onchange="(async function(el){
+                        if(!el.checked) return;
+                        el.disabled=true;
+                        await fetch('/tasks-api/complete-work-task',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({uid:'{{ .String "uid" }}'})});
+                        setTimeout(()=>location.reload(),500);
+                      })(this)">
+                    <div>
+                      <div class="size-h4">{{ .String "title" }}</div>
+                      {{ if .String "start" }}
+                        <div class="size-h6 color-muted">Start: {{ .String "start" }}</div>
+                      {{ end }}
+                      {{ if .String "due" }}
+                        <div class="size-h6 color-muted">Fällig: {{ .String "due" }}</div>
+                      {{ end }}
+                    </div>
+                  </li>
+                {{ end }}
+              </ul>
+            {{ end }}
+            <form style="display:flex; flex-direction:column; gap:6px; margin-top:10px;"
+              onsubmit="(async function(e){
+                e.preventDefault();
+                const f = e.target;
+                const title = f.querySelector('input[name=title]').value.trim();
+                if (!title) return;
+                const startDate = f.querySelector('input[name=startDate]').value || null;
+                const endDate = f.querySelector('input[name=endDate]').value || null;
+                await fetch('/tasks-api/work-tasks',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({title,startDate,endDate})});
+                f.reset();
+                setTimeout(()=>location.reload(),500);
+              })(event)">
+              <div style="display:flex; gap:6px;">
+                <input name="title" type="text" placeholder="Aufgabe hinzufügen…" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
+                <button type="submit" style="background:var(--color-primary); border:none; border-radius:4px; padding:4px 10px; color:#fff; cursor:pointer; font-size:1.1rem; font-weight:bold;">+</button>
+              </div>
+              <div style="display:flex; gap:6px;">
+                <input name="startDate" type="date" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
+                <input name="endDate" type="date" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
+              </div>
+            </form>
+
+        - type: custom-api
+          title: Spotify
+          cache: 1s
+          template: |
+            <style>
+              .offline-indicator {
+                width: 8px;
+                height: 7px;
+                border-radius: 50%;
+                background-color: var(--color-negative);
+                display: inline-block;
+                margin-left: 4px;
+                vertical-align: middle;
+              }
+
+              .indicators-container {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+              }
+            </style>
+            {{
+              $tokenRes := newRequest "https://accounts.spotify.com/api/token"
+                | withHeader "Authorization" "Basic ${SPOTIFY_BTOA}"
+                | withHeader "Content-Type" "application/x-www-form-urlencoded"
+                | withStringBody "grant_type=refresh_token&refresh_token=${SPOTIFY_REFRESH}"
+                | getResponse
+            }}
+
+            {{ if eq $tokenRes.Response.StatusCode 200 }}
+              {{ $accessToken := $tokenRes.JSON.String "access_token" }}
+
+              {{ $currentlyPlaying := newRequest "https://api.spotify.com/v1/me/player"
+                  | withHeader "Authorization" (print "Bearer " $accessToken)
+                  | getResponse
+              }}
+              {{ if eq $currentlyPlaying.Response.StatusCode 204 }}
+              <div class="flex items-center">
+                <p style="margin-right:10px;">Offline</p>
+                <div class="indicators-container">
+                  <span class="offline-indicator" data-popover-type="text"
+                        data-popover-text="No current playback">
+                  </span>
+                </div>
+              </div>
+              {{ end}}
+
+              {{ $isCurrentlyPlaying := $currentlyPlaying.JSON.Bool "is_playing" }}
+              {{ $isDeviceActive := $currentlyPlaying.JSON.Bool "device.is_active" }}
+              {{ $isPrivateSession := $currentlyPlaying.JSON.Bool "device.is_private_session" }}
+              {{ $deviceName := $currentlyPlaying.JSON.String "device.name" }}
+              {{ $queueRes := newRequest "https://api.spotify.com/v1/me/player/queue"
+                  | withHeader "Authorization" (print "Bearer " $accessToken)
+                  | getResponse
+              }}
+
+              {{ if eq $queueRes.Response.StatusCode 200 }}
+                {{ $data := $queueRes.JSON }}
+                {{ $queue := $data.Array "queue" }}
+
+                {{ $artist := $data.String "currently_playing.artists.0.name" }}
+
+                {{ if gt (len $artist) 0 }}
+                <div class="size-h5">NOW PLAYING</div>
+                <div class="widget-content-frame flex flex-row items-center gap-20" style="padding: 4px; margin-top: 4px; margin-bottom: 4px;">
+                  <div>
+                    <img src="{{ $data.String "currently_playing.album.images.0.url" }}" style="border-radius: 5px; width: 5rem;" class="card">
+                  </div>
+                  <div class="flex grow flex-column justify-center pr-2">
+                    <div class="color-positive size-h4 font-bold">{{ $data.String "currently_playing.name" }}</div>
+                    <div class="size-h5">{{ $artist }}</div>
+                  </div>
+                  {{ if and $isDeviceActive (not $isPrivateSession) }}
+                    {{ if $isCurrentlyPlaying }}
+                      <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/pause',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">⏸</button>
+                        <p>{{ $deviceName }}</p>
+                      </div>
+                    {{ else }}
+                      <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/play',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">▶</button>
+                        <p>{{ $deviceName }}</p>
+                      </div>
+                    {{ end }}
+                  {{ else if $isPrivateSession }}
+                  <p style="margin-right:10px;">Private session</p>
+                  {{ else }}
+                  <p style="margin-right:10px;">Error</p>
+                  {{ end }}
+                </div>
+                {{ end }}
+
+                {{ if gt (len $queue) 0 }}
+                  <div class="size-h5 color-muted font-bold" style="margin-top: 10px;">UPCOMING:</div>
+                  {{ range $i, $track := $queue }}
+                    {{ if lt $i 5 }}
+                      <div
+                        class="widget-content-frame flex flex-row items-center gap-20"
+                        style="padding: 4px; margin-top: 4px; margin-bottom: 4px; cursor: pointer;"
+                        onclick="(function(){
+                          for (let j = 0; j < {{ add $i 1}}; j++) {
+                            fetch('https://api.spotify.com/v1/me/player/next', {
+                              method: 'POST',
+                              headers: {
+                                'Authorization': 'Bearer {{ $accessToken }}'
+                              }
+                            });
+                          }
+                          setTimeout(() => location.reload(), 2000);
+                        })()"
+                      >
+                        <div>
+                          <img src="{{ $track.String "album.images.0.url" }}" style="border-radius: 5px; width: 5rem;" class="card">
+                        </div>
+                        <div class="flex grow flex-column justify-center pr-2">
+                          <div class="color-positive size-h4 font-bold">{{ $track.String "name" }}</div>
+                          <div class="size-h5">{{ $track.String "artists.0.name" }}</div>
+                        </div>
+                      </div>
+                    {{ end }}
+                  {{ end }}
+                {{ end }}
+
+              {{ else }}
+                <p>Failed to fetch queue: {{ $queueRes.Response.Status }}</p>
+              {{ end }}
+
+            {{ else }}
+              <p>Failed to get token: {{ $tokenRes.Response.Status }}</p>
+            {{ end }}

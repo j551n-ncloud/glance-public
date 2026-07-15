@@ -1,0 +1,86 @@
+events {}
+
+http {
+  server {
+    listen 80;
+
+    # Calendar/task API paths.
+    # POST: passed through; ics-proxy enforces the X-Api-Token itself.
+    # GET:  denied unless the request carries the correct X-Api-Token.
+    #       (Glance widgets read GET endpoints directly over the Docker
+    #        network, bypassing nginx, so they are unaffected.)
+    location /ews-api/ {
+      set $api_ok 0;
+      if ($request_method = POST) { set $api_ok 1; }
+      if ($http_x_api_token = "${API_TOKEN}") { set $api_ok 1; }
+      if ($api_ok = 0) { return 403; }
+      proxy_pass http://ics-proxy:3000/;
+      proxy_set_header Host $host;
+    }
+
+    location /tasks-api/ {
+      set $api_ok 0;
+      if ($request_method = POST) { set $api_ok 1; }
+      if ($http_x_api_token = "${API_TOKEN}") { set $api_ok 1; }
+      if ($api_ok = 0) { return 403; }
+      proxy_pass http://ics-proxy:3000/;
+      proxy_set_header Host $host;
+    }
+
+    # Nextcloud Deck read API (read-only; token required for every request).
+    location /deck-api/ {
+      if ($http_x_api_token != "${API_TOKEN}") { return 403; }
+      proxy_pass http://ics-proxy:3000/deck/;
+      proxy_set_header Host $host;
+    }
+
+    # Strava read API (read-only; token required for every request). The
+    # Glance widget reads ics-proxy directly over the Docker network and
+    # bypasses this location.
+    location /strava-api/ {
+      if ($http_x_api_token != "${API_TOKEN}") { return 403; }
+      proxy_pass http://ics-proxy:3000/strava/;
+      proxy_set_header Host $host;
+    }
+
+    # Apple Health API. POST /health-api/ingest is passed through (ics-proxy
+    # enforces the token); GET reads require the token here. Prefix preserved.
+    location /health-api/ {
+      set $api_ok 0;
+      if ($request_method = POST) { set $api_ok 1; }
+      if ($http_x_api_token = "${API_TOKEN}") { set $api_ok 1; }
+      if ($api_ok = 0) { return 403; }
+      client_max_body_size 25m;
+      proxy_pass http://ics-proxy:3000/health-api/;
+      proxy_set_header Host $host;
+    }
+
+    # OAuth Protected Resource Metadata (RFC 9728), public so claude.ai can
+    # discover the authorization server (Pocket ID) before it has a token.
+    location /.well-known/oauth-protected-resource {
+      proxy_pass http://mcp:3001;
+      proxy_set_header Host $host;
+    }
+
+    # MCP server (Streamable HTTP). Auth is enforced by the mcp service itself:
+    # X-Api-Token (Claude Code) OR a Pocket ID Bearer JWT (claude.ai web). nginx
+    # passes everything through so the 401 + WWW-Authenticate OAuth dance works.
+    location /mcp {
+      proxy_pass http://mcp:3001;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_set_header Host $host;
+      proxy_set_header Authorization $http_authorization;
+      proxy_buffering off;
+      proxy_read_timeout 3600s;
+    }
+
+    location / {
+      proxy_pass http://glance:8080;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    }
+  }
+}
