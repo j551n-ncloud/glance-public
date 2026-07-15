@@ -179,7 +179,46 @@ Dashboard available at `http://localhost:8088`. Four containers come up: `nginx`
    https://<nextcloud>/remote.php/dav/calendars/<user>/<list-name>/?export
    ```
 
-## Strava setup (optional, read-only)
+## Refresh tokens (Spotify and Strava)
+
+Both integrations use the same OAuth pattern: a one-time browser authorization
+yields a long-lived **refresh token**, which goes in `.env`. At runtime,
+short-lived access tokens are minted from it automatically (the Spotify widget
+does this client-side on each load, the proxy does it server-side for Strava),
+so you never have to repeat the browser step unless you revoke access.
+
+### Spotify setup (optional)
+
+The Spotify widget needs a refresh token with playback scopes:
+
+1. Create an app at https://developer.spotify.com/dashboard. Add
+   `http://127.0.0.1:8888/callback` as a **Redirect URI**. Note the Client ID
+   and Client Secret.
+2. Authorize once in a browser, substituting your client id:
+   ```
+   https://accounts.spotify.com/authorize?client_id=<CLIENT_ID>&response_type=code&redirect_uri=http://127.0.0.1:8888/callback&scope=user-read-playback-state%20user-modify-playback-state
+   ```
+   The redirect to `http://127.0.0.1:8888/callback?code=XXXX` shows a browser
+   error (nothing runs there); copy the `code` from the address bar. The code
+   expires after a few minutes, so do step 3 right away.
+3. Exchange the code for a refresh token:
+   ```bash
+   curl -s -X POST https://accounts.spotify.com/api/token \
+     -H "Authorization: Basic $(printf '%s' '<CLIENT_ID>:<CLIENT_SECRET>' | base64)" \
+     -d grant_type=authorization_code -d code=<CODE> \
+     -d redirect_uri=http://127.0.0.1:8888/callback | jq -r .refresh_token
+   ```
+4. Fill in `.env`:
+   ```bash
+   SPOTIFY_BTOA=$(printf '%s' '<CLIENT_ID>:<CLIENT_SECRET>' | base64)
+   SPOTIFY_REFRESH=<refresh token from step 3>
+   ```
+5. Restart Glance: `docker compose up -d --build glance`.
+
+Spotify refresh tokens do not rotate on use; they stay valid until you revoke
+the app under https://www.spotify.com/account/apps/.
+
+### Strava setup (optional, read-only)
 
 One-time OAuth to obtain a refresh token with the activity scope:
 
@@ -207,7 +246,8 @@ One-time OAuth to obtain a refresh token with the activity scope:
 
 The proxy refreshes access tokens automatically. If Strava ever rotates the
 refresh token, ics-proxy logs the new value (`Strava rotated the refresh
-token...`); update `.env` with it.
+token...`); update `.env` with it. (This differs from Spotify, whose refresh
+tokens never rotate.)
 
 ## API & MCP access
 
