@@ -6,7 +6,7 @@
           hour-format: 24h
           timezones:
             - timezone: Europe/Berlin
-              label: Berlin
+              label: Heidelberg
 
         - type: custom-api
           title: Termine
@@ -46,7 +46,7 @@
             - title: Quick
               links:
                 - title: Proxmox UI
-                  url: https://proxmox.home.example.com
+                  url: https://mdm.home.example.com
                 - title: Portainer
                   url: https://portainer.home.example.com
                 - title: Vaultwarden
@@ -81,7 +81,7 @@
               url: https://gitlab.home.example.com
               icon: si:gitlab
             - title: Proxmox
-              url: https://proxmox.home.example.com
+              url: https://mdm.home.example.com
               icon: si:proxmox
               allow-insecure: true
             - title: Grafana
@@ -172,12 +172,12 @@
                   {{ if and $isDeviceActive (not $isPrivateSession) }}
                     {{ if $isCurrentlyPlaying }}
                       <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
-                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/pause',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">⏸</button>
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/pause',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}});">⏸</button>
                         <p>{{ $deviceName }}</p>
                       </div>
                     {{ else }}
                       <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
-                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/play',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">▶</button>
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/play',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}});">▶</button>
                         <p>{{ $deviceName }}</p>
                       </div>
                     {{ end }}
@@ -205,7 +205,6 @@
                               }
                             });
                           }
-                          setTimeout(() => location.reload(), 2000);
                         })()"
                       >
                         <div>
@@ -245,8 +244,9 @@
                       onchange="(async function(el){
                         if(!el.checked) return;
                         el.disabled=true;
+                        const li = el.closest('li');
                         await fetch('/tasks-api/complete-home-task',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({uid:'{{ .String "uid" }}'})});
-                        setTimeout(()=>location.reload(),500);
+                        if (li) { li.style.transition='opacity .2s'; li.style.opacity='0'; setTimeout(()=>li.remove(),200); }
                       })(this)">
                     <div>
                       <div class="size-h4">{{ .String "title" }}</div>
@@ -261,7 +261,7 @@
                 {{ end }}
               </ul>
             {{ end }}
-            <form style="display:flex; flex-direction:column; gap:6px; margin-top:10px;"
+            <form data-todo-form="home" style="display:flex; flex-direction:column; gap:6px; margin-top:10px;"
               onsubmit="(async function(e){
                 e.preventDefault();
                 const f = e.target;
@@ -271,7 +271,9 @@
                 const endDate = f.querySelector('input[name=endDate]').value || null;
                 await fetch('/tasks-api/home-tasks',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({title,startDate,endDate})});
                 f.reset();
-                setTimeout(()=>location.reload(),500);
+                ['home-todo-title','home-todo-startDate','home-todo-endDate','home-todo-focus'].forEach(k=>localStorage.removeItem(k));
+                // No reload: this widget's own cache (15s) plus the live
+                // update stream will bring the new task in on its own.
               })(event)">
               <div style="display:flex; gap:6px;">
                 <input name="title" type="text" placeholder="Aufgabe hinzufügen…" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
@@ -282,33 +284,82 @@
                 <input name="endDate" type="date" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
               </div>
             </form>
+            <!-- Glance's live updates morph this widget's HTML via Idiomorph
+                 (not a plain innerHTML swap), and Idiomorph forces an
+                 <input>'s live value back to empty whenever the freshly
+                 rendered server HTML has no `value` attribute — which ours
+                 never does, regardless of focus (Glance's morph call doesn't
+                 pass Idiomorph's `ignoreActiveValue` option). This happens on
+                 every live update, not just the 15s cache refresh. A one-shot
+                 restore (e.g. img-onerror alone) isn't enough since it only
+                 fires once at page load; this installs a small recurring
+                 poll that re-fills the field from localStorage whenever it
+                 gets wiped, using data-todo-form to always re-find the live
+                 form (in case Idiomorph ever replaces the node outright
+                 rather than just clearing its value). Draft is cleared on
+                 successful submit above. -->
+            <img src="x" onerror="(function(){if(window.__homeTodoPoll)return;window.__homeTodoPoll=true;var sel='form[data-todo-form=&quot;home&quot;]';var prefix='home-todo-';var fields=['title','startDate','endDate'];function bind(){var f=document.querySelector(sel);if(!f)return;fields.forEach(function(n){var el=f.querySelector('input[name=&quot;'+n+'&quot;]');if(!el||el.dataset.bound)return;el.dataset.bound='1';var k=prefix+n;var v=localStorage.getItem(k);if(v)el.value=v;el.addEventListener('input',function(){localStorage.setItem(k,this.value)});el.addEventListener('focus',function(){localStorage.setItem(prefix+'focus',n)});el.addEventListener('blur',function(){if(localStorage.getItem(prefix+'focus')===n)localStorage.removeItem(prefix+'focus')})})}bind();setInterval(function(){var f=document.querySelector(sel);if(!f)return;bind();fields.forEach(function(n){var el=f.querySelector('input[name=&quot;'+n+'&quot;]');if(!el)return;var saved=localStorage.getItem(prefix+n)||'';if(saved&&!el.value)el.value=saved});var af=localStorage.getItem(prefix+'focus');if(af&&document.activeElement===document.body){var el2=f.querySelector('input[name=&quot;'+af+'&quot;]');if(el2)el2.focus()}},300);this.remove()})();" style="display:none">
 
         - type: server-stats
           servers:
             - type: local
               name: Glance Host
 
+        # Replaces the old activity-list Strava widget (redundant with the
+        # full Strava page's charts) with a compact operational status panel:
+        # last Strava sync, last Health import, semantic-search index state,
+        # and cache freshness — reads /status, the same endpoint used for
+        # troubleshooting elsewhere in this repo (see CLAUDE.md).
         - type: custom-api
-          title: Strava
-          cache: 10m
-          url: http://ics-proxy:3000/strava/activities?per_page=8
+          title: Status
+          cache: 1m
+          url: http://ics-proxy:3000/status
           template: |
-            {{ if eq (len (.JSON.Array "")) 0 }}
-              <p>Keine Aktivitäten.</p>
-            {{ else }}
-              <ul class="list list-gap-10" style="max-height:260px; overflow-y:auto; padding-right:4px;">
-                {{ range .JSON.Array "" }}
-                  <li>
-                    <div class="color-highlight size-h4">{{ .String "name" }}</div>
-                    <div class="size-h6">
-                      {{ .String "sport_type" }} · {{ .String "when" }}
-                    </div>
-                    <div class="size-h6">
-                      {{ if .Float "distance_km" }}{{ printf "%.1f" (.Float "distance_km") }} km{{ end }}
-                      {{ if .String "moving_time" }} · {{ .String "moving_time" }}{{ end }}
-                      {{ if .Float "avg_hr" }} · {{ printf "%.0f" (.Float "avg_hr") }} bpm{{ end }}
-                    </div>
-                  </li>
-                {{ end }}
-              </ul>
-            {{ end }}
+            <ul class="list list-gap-10">
+              <li>
+                <div class="size-h6 color-muted">Strava-Sync</div>
+                <div class="size-h4">
+                  {{ if .JSON.String "strava.lastSync.atLabel" }}{{ .JSON.String "strava.lastSync.atLabel" }}{{ else }}nie{{ end }}
+                  {{ if .JSON.Float "strava.dbActivities" }} · {{ printf "%.0f" (.JSON.Float "strava.dbActivities") }} Aktivitäten{{ end }}
+                </div>
+              </li>
+              <li>
+                <div class="size-h6 color-muted">Health-Import</div>
+                <div class="size-h4">
+                  {{ if .JSON.String "health.lastIngest.atLabel" }}{{ .JSON.String "health.lastIngest.atLabel" }}{{ else }}nie{{ end }}
+                </div>
+              </li>
+              {{ if .JSON.Bool "embeddings.configured" }}
+              <li>
+                <div class="size-h6 color-muted">Notizen-Index</div>
+                <div class="size-h4">
+                  {{ printf "%.0f" (.JSON.Float "embeddings.indexedNotes") }} Notizen
+                  {{ if .JSON.String "embeddings.lastSync.atLabel" }} · {{ .JSON.String "embeddings.lastSync.atLabel" }}{{ end }}
+                </div>
+              </li>
+              {{ end }}
+              <li>
+                <div class="size-h6 color-muted">Caches</div>
+                <div class="size-h5">
+                  EWS {{ if .JSON.Bool "caches.ews.populated" }}✓{{ else }}–{{ end }}
+                  · ICS {{ if .JSON.Bool "caches.ics.populated" }}✓{{ else }}–{{ end }}
+                  · Tasks {{ if .JSON.Bool "caches.homeTasks.populated" }}✓{{ else }}–{{ end }}/{{ if .JSON.Bool "caches.workTasks.populated" }}✓{{ else }}–{{ end }}
+                  · Wetter {{ len (.JSON.Array "caches.weather.days") }}d
+                </div>
+              </li>
+              <li>
+                <div class="size-h6 color-muted">Backends</div>
+                <div class="size-h5">
+                  Exchange {{ if .JSON.Bool "backends.exchange" }}✓{{ else }}–{{ end }}
+                  · Nextcloud {{ if .JSON.Bool "backends.nextcloud" }}✓{{ else }}–{{ end }}
+                  · Wetter {{ if .JSON.Bool "backends.weather" }}✓{{ else }}–{{ end }}
+                </div>
+              </li>
+              <li>
+                <div class="size-h6 color-muted">Digest</div>
+                <div class="size-h5">
+                  Täglich {{ if .JSON.Bool "digests.daily.enabled" }}✓ ({{ .JSON.String "digests.daily.cron" }}){{ else }}–{{ end }}
+                  · Wöchentlich {{ if .JSON.Bool "digests.weekly.enabled" }}✓{{ else }}–{{ end }}
+                </div>
+              </li>
+            </ul>

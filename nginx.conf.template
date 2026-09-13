@@ -1,6 +1,14 @@
 events {}
 
 http {
+  # Cloudflare fronts this origin and pools/reuses connections to it; nginx's
+  # compiled-in default keepalive_timeout (75s) is shorter than Cloudflare's
+  # idle-connection-reuse window under low traffic, so a request occasionally
+  # goes out over a connection nginx already closed -> immediate reset on the
+  # first try, instant success on retry (a fresh connection). Keep this above
+  # Cloudflare's reuse window so nginx never closes first.
+  keepalive_timeout 120s;
+
   server {
     listen 80;
 
@@ -27,10 +35,29 @@ http {
       proxy_set_header Host $host;
     }
 
+    # ICS calendar-feed export (read-only Exchange-calendar subscription for
+    # Nextcloud etc.). Deliberately NOT gated by X-Api-Token here — a
+    # subscription client can't send custom headers. ics-proxy itself checks
+    # the ?token= query param (CALENDAR_FEED_TOKEN); see CLAUDE.md.
+    location /calendar-feed.ics {
+      proxy_pass http://ics-proxy:3000/calendar-feed.ics;
+      proxy_set_header Host $host;
+    }
+
     # Nextcloud Deck read API (read-only; token required for every request).
     location /deck-api/ {
       if ($http_x_api_token != "${API_TOKEN}") { return 403; }
       proxy_pass http://ics-proxy:3000/deck/;
+      proxy_set_header Host $host;
+    }
+
+    # Bike maintenance API (token required for every request, GET and POST
+    # alike — same model as Deck, since the reset write also lives under
+    # this prefix). The Glance widget reads ics-proxy directly and bypasses
+    # this location.
+    location /bike-api/ {
+      if ($http_x_api_token != "${API_TOKEN}") { return 403; }
+      proxy_pass http://ics-proxy:3000/bike/;
       proxy_set_header Host $host;
     }
 
@@ -40,6 +67,22 @@ http {
     location /strava-api/ {
       if ($http_x_api_token != "${API_TOKEN}") { return 403; }
       proxy_pass http://ics-proxy:3000/strava/;
+      proxy_set_header Host $host;
+    }
+
+    # Garmin Connect workout API (token required for every request, GET and
+    # POST alike -- same model as Deck/bike-api, since these are all writes
+    # or write-adjacent). No Glance widget reads this, so no bypass needed.
+    location /garmin-api/ {
+      if ($http_x_api_token != "${API_TOKEN}") { return 403; }
+      proxy_pass http://ics-proxy:3000/garmin/;
+      proxy_set_header Host $host;
+    }
+
+    # SiYuan Note API, scoped to one dedicated notebook (token required for every request).
+    location /siyuan-api/ {
+      if ($http_x_api_token != "${API_TOKEN}") { return 403; }
+      proxy_pass http://ics-proxy:3000/siyuan/;
       proxy_set_header Host $host;
     }
 
@@ -71,6 +114,18 @@ http {
       proxy_set_header Connection "";
       proxy_set_header Host $host;
       proxy_set_header Authorization $http_authorization;
+      proxy_buffering off;
+      proxy_read_timeout 3600s;
+    }
+
+    # Live widget updates (server-sent events). Needs buffering disabled and a
+    # long read timeout, otherwise nginx holds the stream until its buffer
+    # fills or the connection closes and updates never reach the browser.
+    location /api/sse/ {
+      proxy_pass http://glance:8080;
+      proxy_http_version 1.1;
+      proxy_set_header Connection "";
+      proxy_set_header Host $host;
       proxy_buffering off;
       proxy_read_timeout 3600s;
     }

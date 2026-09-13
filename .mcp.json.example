@@ -6,6 +6,13 @@
       "headers": {
         "X-Api-Token": "<API_TOKEN from .env>"
       }
+    },
+    "glance-remote": {
+      "type": "http",
+      "url": "https://dash.example.com/mcp",
+      "headers": {
+        "X-Api-Token": "<API_TOKEN from .env>"
+      }
     }
   }
 }

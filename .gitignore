@@ -1,6 +1,15 @@
 ics-proxy/node_modules/
 mcp/node_modules/
 data/
+
+# Never commit the real secrets - copy the .example files instead.
 .env
 .mcp.json
+
+# openGym: a separate upstream repo (its own .git, own history) cloned in
+# place, not a submodule of this one. Its ./data holds real passkeys and
+# workout history, and ./media is a large downloaded dataset - neither
+# belongs in this repo's history either way.
+openGym/
+
 .DS_Store

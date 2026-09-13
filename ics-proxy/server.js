@@ -13,6 +13,7 @@ catch (e) { console.error('better-sqlite3 unavailable, Strava history disabled:'
 const {
   API_TOKEN, PORT, ICS_URL, ICS_USER, ICS_PASS, CAL_URL,
   EWS_URL, EWS_USER, EWS_PASS, EWS_DOMAIN,
+  CALENDAR_FEED_TOKEN, CALENDAR_FEED_PAST_DAYS, CALENDAR_FEED_FUTURE_DAYS,
   TASKS_HOME_URL, TASKS_WORK_URL, TASKS_USER, TASKS_PASS,
   CACHE_TTL_MS, LIMIT,
   DIGEST_ENABLED, DIGEST_TO, DIGEST_CRON, DIGEST_TZ, DIGEST_PRIORITY,
@@ -21,13 +22,26 @@ const {
   STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, STRAVA_REFRESH_TOKEN, STRAVA_API,
   STRAVA_CACHE_TTL_MS, STRAVA_GOAL_RUN_KM, STRAVA_GOAL_RIDE_KM, STRAVA_GOAL_SWIM_KM, STRAVA_DB,
 } = require('./lib/config');
+const ntfy = require('./lib/ntfy');
 
 const app = express();
+// Every route here is a live JSON API, not static content, so an HTTP-level
+// ETag/If-None-Match dance buys nothing and actively breaks things: Express
+// enables etag generation by default, and with Cloudflare fronting the
+// origin (see nginx.conf.template), that produces bodyless 304 responses to
+// plain browser fetch()es that never sent a conditional header themselves —
+// calling .json() on the empty body then throws (Chrome: "Unexpected end of
+// JSON input"; Safari: "The string did not match the expected pattern.").
+// Every chart widget on the dashboard hit this. Disabling etag generation
+// removes the 304 path entirely; explicit no-store below tells any cache in
+// front (Cloudflare included) not to store or revalidate these responses.
+app.set('etag', false);
 app.use(express.json({ limit: '20mb' })); // Health Auto Export payloads can be large
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Api-Token');
+  res.setHeader('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -336,6 +350,16 @@ let icsCache = { ts: 0, data: null };
 let homeTasksCache = { ts: 0, data: null };
 let workTasksCache = { ts: 0, data: null };
 
+// Invalidate a cache after a write. Clearing `data` (not just `ts`) matters:
+// handleRequest() serves `data` immediately if present, so leaving stale data
+// in place means the very next GET (e.g. a post-write verification read)
+// returns pre-write results and only kicks off a background refresh. Clearing
+// `data` forces that next GET to synchronously fetch fresh state instead.
+function invalidateCache(cacheObj) {
+  cacheObj.ts = 0;
+  cacheObj.data = null;
+}
+
 async function handleRequest(res, fetchFn, cacheObj) {
   try {
     if (cacheObj.data) {
@@ -422,6 +446,22 @@ async function stravaCached(key, fetchFn, res) {
   }
 }
 
+// Reuses the same 'gear' cache entry the /strava/gear route populates,
+// rather than a second independent Strava API call — bike maintenance
+// status gets checked often (dashboard widget, weekly digest) and Strava's
+// app-wide rate limit is easy to exhaust.
+async function getBikeGearDistanceKm(bikeId) {
+  const hit = stravaCache.get('gear');
+  let data = hit && hit.data;
+  if (!data || Date.now() - hit.ts >= STRAVA_CACHE_TTL_MS) {
+    data = await stravaGet('/athlete').then((a) => ({ bikes: a.bikes || [], shoes: a.shoes || [] }));
+    stravaCache.set('gear', { ts: Date.now(), data });
+  }
+  const bike = (data.bikes || []).find((b) => b.id === bikeId);
+  if (!bike) throw new Error(`bike ${bikeId} not found in Strava gear`);
+  return bike.distance / 1000;
+}
+
 function hms(seconds) {
   if (seconds == null) return null;
   const h = Math.floor(seconds / 3600);
@@ -454,6 +494,7 @@ function simplifyActivities(arr) {
       avg_hr: a.average_heartrate ?? null,
       max_hr: a.max_heartrate ?? null,
       avg_watts: a.average_watts ?? null,
+      avg_cadence: a.average_cadence ?? null,
       relative_effort: a.suffer_score ?? null, // Strava "Relative Effort" / activity score
       kudos: a.kudos_count ?? null,
       pr_count: a.pr_count ?? null,
@@ -465,12 +506,115 @@ function simplifyActivities(arr) {
   });
 }
 
+// Decode a Google/Strava encoded polyline (precision 5) into [lat, lng] pairs.
+// https://developers.google.com/maps/documentation/utilities/polylinealgorithm
+function decodePolyline(str) {
+  if (!str) return null;
+  let index = 0, lat = 0, lng = 0;
+  const coords = [];
+  while (index < str.length) {
+    let result = 1, shift = 0, b;
+    do {
+      b = str.charCodeAt(index++) - 63 - 1;
+      result += b << shift;
+      shift += 5;
+    } while (b >= 0x1f);
+    lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+
+    result = 1;
+    shift = 0;
+    do {
+      b = str.charCodeAt(index++) - 63 - 1;
+      result += b << shift;
+      shift += 5;
+    } while (b >= 0x1f);
+    lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+
+    coords.push([+(lat * 1e-5).toFixed(5), +(lng * 1e-5).toFixed(5)]);
+  }
+  return coords;
+}
+
+// Trim Strava's verbose detailed-activity payload to widget/assistant-friendly
+// fields, mirroring simplifyActivities' philosophy (metric units, Berlin
+// `when`), extended with the extra detail this endpoint carries: cadence,
+// power, effort, elevation range, environment, location, full gear, and route.
+// Drops social counters (kudos/comment/photo/athlete_count) and
+// account/visibility flags (commute, trainer, manual, flagged, private,
+// visibility) - noise for the assistant, not metrics. `route_latlng` decodes
+// the compact summary_polyline (not the full-resolution one, which can run to
+// thousands of points); laps/segment_efforts/splits pass through as Strava
+// shapes them.
+function simplifyActivity(a) {
+  if (!a || typeof a !== 'object') return a;
+  const start = a.start_date ? new Date(a.start_date) : null;
+  return {
+    id: a.id,
+    name: a.name,
+    sport_type: a.sport_type || a.type || null,
+    start: a.start_date || null,
+    start_local: a.start_date_local || null,
+    when: start ? fmt.format(start) : null,
+    timezone: a.timezone ?? null,
+
+    distance_km: a.distance != null ? +(a.distance / 1000).toFixed(2) : null,
+    moving_time: hms(a.moving_time),
+    elapsed_time: hms(a.elapsed_time),
+    moving_time_s: a.moving_time ?? null,
+    elevation_gain_m: a.total_elevation_gain ?? null,
+    elev_high_m: a.elev_high ?? null,
+    elev_low_m: a.elev_low ?? null,
+
+    avg_speed_kmh: a.average_speed != null ? +(a.average_speed * 3.6).toFixed(2) : null,
+    max_speed_kmh: a.max_speed != null ? +(a.max_speed * 3.6).toFixed(2) : null,
+    avg_hr: a.average_heartrate ?? null,
+    max_hr: a.max_heartrate ?? null,
+    avg_watts: a.average_watts ?? null,
+    device_watts: a.device_watts ?? null,
+    kilojoules: a.kilojoules ?? null,
+    avg_cadence: a.average_cadence ?? null,
+    calories: a.calories ?? null,
+
+    relative_effort: a.suffer_score ?? null,
+    perceived_exertion: a.perceived_exertion ?? null,
+    workout_type: a.workout_type ?? null,
+    pr_count: a.pr_count ?? null,
+    achievement_count: a.achievement_count ?? null,
+
+    avg_temp_c: a.average_temp ?? null,
+    device_name: a.device_name ?? null,
+    location_city: a.location_city ?? null,
+    location_state: a.location_state ?? null,
+    location_country: a.location_country ?? null,
+    start_latlng: a.start_latlng ?? null,
+    end_latlng: a.end_latlng ?? null,
+
+    gear: a.gear ? {
+      id: a.gear.id ?? null,
+      name: a.gear.name ?? null,
+      distance_km: a.gear.distance != null ? +(a.gear.distance / 1000).toFixed(2) : null,
+      retired: a.gear.retired ?? null,
+    } : (a.gear_id ? { id: a.gear_id } : null),
+
+    map: a.map ? {
+      polyline: a.map.polyline ?? null,
+      summary_polyline: a.map.summary_polyline ?? null,
+      route_latlng: decodePolyline(a.map.summary_polyline),
+    } : null,
+
+    laps: a.laps ?? null,
+    segment_efforts: a.segment_efforts ?? null,
+    splits_metric: a.splits_metric ?? null,
+    splits_standard: a.splits_standard ?? null,
+  };
+}
+
 async function createTask(calUrl, title, startDate, endDate) {
   const uid = 'glance-' + Date.now();
   const now = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15) + 'Z';
   const lines = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VTODO',
-    `UID:${uid}`, `SUMMARY:${title}`, `DTSTAMP:${now}`,
+    `UID:${uid}`, `SUMMARY:${icsEscape(title)}`, `DTSTAMP:${now}`,
     'STATUS:NEEDS-ACTION',
   ];
   if (startDate) lines.push(icsDateProp('DTSTART', startDate));
@@ -545,7 +689,7 @@ async function createCalEvent(summary, start, end, location, description) {
   const allDay = /^\d{4}-\d{2}-\d{2}$/.test(start);
   const lines = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//glance//EN', 'BEGIN:VEVENT',
-    `UID:${uid}`, `DTSTAMP:${now}`, `SUMMARY:${summary}`,
+    `UID:${uid}`, `DTSTAMP:${now}`, `SUMMARY:${icsEscape(summary)}`,
   ];
   if (allDay) {
     const endDate = end || start;
@@ -557,7 +701,7 @@ async function createCalEvent(summary, start, end, location, description) {
     lines.push(`DTSTART:${icsStamp(s)}`);
     lines.push(`DTEND:${icsStamp(e)}`);
   }
-  if (location) lines.push(`LOCATION:${location}`);
+  if (location) lines.push(`LOCATION:${icsEscape(location)}`);
   if (description) lines.push(`DESCRIPTION:${icsEscape(description)}`);
   lines.push('END:VEVENT', 'END:VCALENDAR');
   const ics = lines.join('\r\n');
@@ -577,7 +721,7 @@ app.post('/ics-events', async (req, res) => {
     const { summary, start, end, location, description } = req.body;
     if (!summary || !start) return res.status(400).json({ error: 'summary and start required' });
     const uid = await createCalEvent(summary, start, end, location, description);
-    icsCache.ts = 0;
+    invalidateCache(icsCache);
     res.json({ ok: true, uid });
   } catch (err) {
     console.error('create cal event failed:', err.message);
@@ -592,15 +736,20 @@ async function completeTask(calUrl, uid) {
   const authHeader = `Basic ${Buffer.from(`${TASKS_USER}:${TASKS_PASS}`).toString('base64')}`;
   const getResp = await fetch(taskUrl, { headers: { Authorization: authHeader } });
   if (!getResp.ok) throw new Error(`GET task failed: ${getResp.status}`);
+  const etag = getResp.headers.get('etag');
   let ics = await getResp.text();
   const now = new Date().toISOString().replace(/[-:.]/g, '').slice(0, 15) + 'Z';
   ics = ics.replace(/STATUS:[^\r\n]*/g, 'STATUS:COMPLETED');
   if (!ics.includes('COMPLETED:')) ics = ics.replace('END:VTODO', `COMPLETED:${now}\r\nEND:VTODO`);
   const putResp = await fetch(taskUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': 'text/calendar; charset=utf-8', Authorization: authHeader },
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8', Authorization: authHeader,
+      ...(etag ? { 'If-Match': etag } : {}),
+    },
     body: ics,
   });
+  if (putResp.status === 412) throw new Error('task was modified concurrently — refetch and retry');
   if (!putResp.ok) throw new Error(`PUT task failed: ${putResp.status}`);
 }
 
@@ -611,13 +760,18 @@ async function renameTask(calUrl, uid, newTitle) {
   const authHeader = `Basic ${Buffer.from(`${TASKS_USER}:${TASKS_PASS}`).toString('base64')}`;
   const getResp = await fetch(taskUrl, { headers: { Authorization: authHeader } });
   if (!getResp.ok) throw new Error(`GET task failed: ${getResp.status}`);
+  const etag = getResp.headers.get('etag');
   let ics = await getResp.text();
-  ics = ics.replace(/SUMMARY:[^\r\n]*/, `SUMMARY:${newTitle}`);
+  ics = ics.replace(/SUMMARY:[^\r\n]*/, `SUMMARY:${icsEscape(newTitle)}`);
   const putResp = await fetch(taskUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': 'text/calendar; charset=utf-8', Authorization: authHeader },
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8', Authorization: authHeader,
+      ...(etag ? { 'If-Match': etag } : {}),
+    },
     body: ics,
   });
+  if (putResp.status === 412) throw new Error('task was modified concurrently — refetch and retry');
   if (!putResp.ok) throw new Error(`PUT task failed: ${putResp.status}`);
 }
 
@@ -626,7 +780,7 @@ app.post('/rename-home-task', async (req, res) => {
     const { uid, newTitle } = req.body;
     if (!uid || !newTitle) return res.status(400).json({ error: 'uid and newTitle required' });
     await renameTask(TASKS_HOME_URL, uid, newTitle);
-    homeTasksCache.ts = 0;
+    invalidateCache(homeTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('rename task failed:', err.message);
@@ -639,7 +793,7 @@ app.post('/rename-work-task', async (req, res) => {
     const { uid, newTitle } = req.body;
     if (!uid || !newTitle) return res.status(400).json({ error: 'uid and newTitle required' });
     await renameTask(TASKS_WORK_URL, uid, newTitle);
-    workTasksCache.ts = 0;
+    invalidateCache(workTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('rename task failed:', err.message);
@@ -652,7 +806,7 @@ app.post('/complete-home-task', async (req, res) => {
     const { uid } = req.body;
     if (!uid) return res.status(400).json({ error: 'uid required' });
     await completeTask(TASKS_HOME_URL, uid);
-    homeTasksCache.ts = 0;
+    invalidateCache(homeTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('complete task failed:', err.message);
@@ -665,7 +819,7 @@ app.post('/complete-work-task', async (req, res) => {
     const { uid } = req.body;
     if (!uid) return res.status(400).json({ error: 'uid required' });
     await completeTask(TASKS_WORK_URL, uid);
-    workTasksCache.ts = 0;
+    invalidateCache(workTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('complete task failed:', err.message);
@@ -678,7 +832,7 @@ app.post('/home-tasks', async (req, res) => {
     const { title, startDate, endDate, duration } = req.body;
     if (!title) return res.status(400).json({ error: 'title required' });
     const uid = await createTask(TASKS_HOME_URL, title, startDate, resolveTaskEnd({ startDate, endDate, duration }));
-    homeTasksCache.ts = 0;
+    invalidateCache(homeTasksCache);
     res.json({ ok: true, uid });
   } catch (err) {
     console.error('create task failed:', err.message);
@@ -691,7 +845,7 @@ app.post('/work-tasks', async (req, res) => {
     const { title, startDate, endDate, duration } = req.body;
     if (!title) return res.status(400).json({ error: 'title required' });
     const uid = await createTask(TASKS_WORK_URL, title, startDate, resolveTaskEnd({ startDate, endDate, duration }));
-    workTasksCache.ts = 0;
+    invalidateCache(workTasksCache);
     res.json({ ok: true, uid });
   } catch (err) {
     console.error('create task failed:', err.message);
@@ -701,7 +855,7 @@ app.post('/work-tasks', async (req, res) => {
 
 function createMeetingSoap({ subject, start, end, location, attendees, body }) {
   const attendeeXml = (attendees || []).map(email => `
-        <t:Attendee><t:Mailbox><t:EmailAddress>${email}</t:EmailAddress></t:Mailbox></t:Attendee>`).join('');
+        <t:Attendee><t:Mailbox><t:EmailAddress>${xmlEscape(email)}</t:EmailAddress></t:Mailbox></t:Attendee>`).join('');
 
   return `<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
@@ -717,11 +871,11 @@ function createMeetingSoap({ subject, start, end, location, attendees, body }) {
       </m:SavedItemFolderId>
       <m:Items>
         <t:CalendarItem>
-          <t:Subject>${subject}</t:Subject>
-          ${body ? `<t:Body BodyType="Text">${body}</t:Body>` : ''}
+          <t:Subject>${xmlEscape(subject)}</t:Subject>
+          ${body ? `<t:Body BodyType="Text">${xmlEscape(body)}</t:Body>` : ''}
           <t:Start>${start}</t:Start>
           <t:End>${end}</t:End>
-          ${location ? `<t:Location>${location}</t:Location>` : ''}
+          ${location ? `<t:Location>${xmlEscape(location)}</t:Location>` : ''}
           ${attendeeXml ? `<t:RequiredAttendees>${attendeeXml}</t:RequiredAttendees>` : ''}
         </t:CalendarItem>
       </m:Items>
@@ -803,7 +957,22 @@ async function ewsCalendarItemType(id) {
 async function deleteExchangeEvent({ id, allowSeries }) {
   if (!id) throw new Error('id is required');
   let type = '';
-  try { type = await ewsCalendarItemType(id); } catch (e) { /* best effort */ }
+  try {
+    type = await ewsCalendarItemType(id);
+  } catch (e) {
+    // Fail closed: if allowSeries isn't set, we can't confirm this ISN'T a
+    // recurring series master, so refuse rather than silently proceeding as
+    // if it were a single occurrence (a transient lookup failure must not
+    // downgrade a destructive delete's safety guard). If allowSeries is
+    // already true the guard below is moot anyway, so a lookup failure there
+    // is genuinely best-effort (only affects the informational `type` in the
+    // response).
+    if (!allowSeries) {
+      const err = new Error(`Could not verify whether this id is a recurring series (lookup failed: ${e.message}). Refusing to delete without confirming — retry, or pass allowSeries:true if you're certain.`);
+      err.code = 'SERIES_GUARD_UNVERIFIED';
+      throw err;
+    }
+  }
   if (type === 'RecurringMaster' && !allowSeries) {
     const e = new Error('This id is a recurring SERIES master. Deleting it would remove the whole series. Use a single occurrence id (list_events returns occurrences), or pass allowSeries:true to delete the entire series on purpose.');
     e.code = 'SERIES_GUARD';
@@ -935,7 +1104,7 @@ function parseResolveNames(xml) {
   for (const r of resolutions) {
     const pick = (re) => { const m = r.match(re); return m ? m[1].trim() : ''; };
     // Prefer the contact display name ("Doe, Jane"); the mailbox Name is
-    // often just the login alias in corporate directories.
+    // often just the login alias at the organization.
     const name = pick(/<t:DisplayName>([\s\S]*?)<\/t:DisplayName>/) || pick(/<t:Mailbox>[\s\S]*?<t:Name>([\s\S]*?)<\/t:Name>/);
     const routing = pick(/<t:RoutingType>([\s\S]*?)<\/t:RoutingType>/);
     const mboxAddr = pick(/<t:Mailbox>[\s\S]*?<t:EmailAddress>([\s\S]*?)<\/t:EmailAddress>/);
@@ -1009,7 +1178,7 @@ app.post('/meetings', async (req, res) => {
     const { subject, start, end, location, attendees, body } = req.body;
     if (!subject || !start || !end) return res.status(400).json({ error: 'subject, start and end are required' });
     await createMeeting({ subject, start, end, location, attendees, body });
-    ewsCache.ts = 0;
+    invalidateCache(ewsCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('create meeting failed:', err.message);
@@ -1024,7 +1193,7 @@ app.post('/delete-exchange-event', async (req, res) => {
     const { id, allowSeries } = req.body || {};
     if (!id) return res.status(400).json({ error: 'id is required' });
     const r = await deleteExchangeEvent({ id, allowSeries: !!allowSeries });
-    ewsCache.ts = 0;
+    invalidateCache(ewsCache);
     res.json({ ok: true, ...r });
   } catch (e) {
     console.error('delete exchange event failed:', e.message);
@@ -1039,7 +1208,7 @@ app.post('/reschedule-exchange-event', async (req, res) => {
     const { id, start, end, allowSeries } = req.body || {};
     if (!id || !start || !end) return res.status(400).json({ error: 'id, start and end are required' });
     const r = await rescheduleExchangeEvent({ id, start, end, allowSeries: !!allowSeries });
-    ewsCache.ts = 0;
+    invalidateCache(ewsCache);
     res.json({ ok: true, ...r });
   } catch (e) {
     console.error('reschedule exchange event failed:', e.message);
@@ -1060,6 +1229,192 @@ const weatherForRequest = weather.weatherForRequest;
 
 // Nextcloud Deck (kanban) read layer, reused by the weekly digest and MCP.
 const deck = require('./lib/deck');
+
+// Bike maintenance tracking (km/day-based reminders), reused by the weekly
+// digest and MCP. Registers its own /bike/* routes.
+const bikeMaintenance = require('./lib/bikeMaintenance')({ getGearDistanceKm: getBikeGearDistanceKm });
+bikeMaintenance.register(app);
+
+// Garmin Connect: push structured training-session workouts. Registers its
+// own /garmin/* routes.
+const garmin = require('./lib/garmin');
+garmin.register(app);
+
+// SiYuan Note read-only search (RAG-style knowledge base lookup).
+const siyuan = require('./lib/siyuan');
+
+// Local semantic (embedding) search over the same RAG notebook.
+const embeddings = require('./lib/embeddings');
+
+app.get('/siyuan/notes', async (_req, res) => {
+  try {
+    res.json({ notes: await siyuan.listAllNotes() });
+  } catch (e) {
+    console.error('siyuan list notes failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/siyuan/search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'q required' });
+    const limit = parseInt(req.query.limit, 10) || 10;
+    res.json({ query: q, results: await siyuan.searchNotes(q, limit) });
+  } catch (e) {
+    console.error('siyuan search failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/siyuan/note', async (req, res) => {
+  try {
+    const id = String(req.query.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    res.json(await siyuan.getNote(id));
+  } catch (e) {
+    console.error('siyuan get note failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/siyuan/note', async (req, res) => {
+  try {
+    const { title, markdown, parentDocId } = req.body || {};
+    if (!title) return res.status(400).json({ error: 'title required' });
+    const result = await siyuan.createNote(title, markdown, parentDocId);
+    res.json({ ok: true, ...result });
+    // Fire-and-forget: index the new note for semantic search without
+    // delaying the response or failing the create if embedding errors.
+    embeddings.upsertNoteEmbedding(result.docId, title)
+      .catch((e) => console.error(`embeddings upsert failed for ${result.docId}:`, e.message));
+  } catch (e) {
+    console.error('siyuan create note failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/siyuan/move-note', async (req, res) => {
+  try {
+    const { docId, parentDocId } = req.body || {};
+    if (!docId) return res.status(400).json({ error: 'docId required' });
+    res.json({ ok: true, ...(await siyuan.moveNote(docId, parentDocId)) });
+  } catch (e) {
+    console.error('siyuan move note failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/siyuan/update-note', async (req, res) => {
+  try {
+    const { docId, markdown, title, mode } = req.body || {};
+    if (!docId || markdown == null) return res.status(400).json({ error: 'docId and markdown required' });
+    if (mode && mode !== 'replace' && mode !== 'append') return res.status(400).json({ error: 'mode must be "replace" or "append"' });
+    const result = await siyuan.updateNote(docId, markdown, title, mode);
+    res.json({ ok: true, ...result });
+    // Re-embed from the note's fresh full content (not just the submitted
+    // body, which in "append" mode is only the added chunk).
+    embeddings.upsertNoteEmbedding(docId, title)
+      .catch((e) => console.error(`embeddings upsert failed for ${docId}:`, e.message));
+  } catch (e) {
+    console.error('siyuan update note failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/siyuan/delete-note', async (req, res) => {
+  try {
+    const { docId } = req.body || {};
+    if (!docId) return res.status(400).json({ error: 'docId required' });
+    const result = await siyuan.deleteNote(docId);
+    res.json(result);
+    try { embeddings.removeNoteEmbedding(docId); }
+    catch (e) { console.error(`embeddings delete failed for ${docId}:`, e.message); }
+  } catch (e) {
+    console.error('siyuan delete note failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/siyuan/note-attrs', async (req, res) => {
+  try {
+    const id = String(req.query.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    res.json(await siyuan.getNoteAttrs(id));
+  } catch (e) {
+    console.error('siyuan get note attrs failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Notes that link to this one via SiYuan's own block-reference syntax
+// (((docId 'text'))), not a text/keyword match — real backlinks.
+app.get('/siyuan/backlinks', async (req, res) => {
+  try {
+    const id = String(req.query.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    res.json({ docId: id, backlinks: await siyuan.getBacklinks(id) });
+  } catch (e) {
+    console.error('siyuan get backlinks failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/siyuan/note-attrs', async (req, res) => {
+  try {
+    const { docId, attrs } = req.body || {};
+    if (!docId || !attrs || typeof attrs !== 'object') return res.status(400).json({ error: 'docId and attrs required' });
+    res.json({ ok: true, ...(await siyuan.setNoteAttrs(docId, attrs)) });
+  } catch (e) {
+    console.error('siyuan set note attrs failed:', e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Meaning-based search over the same RAG notebook (embeddings, not
+// keywords) — complements /siyuan/search for conceptual/paraphrased or
+// cross-language (German/English) matches full-text search would miss.
+app.get('/siyuan/semantic-search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'q required' });
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const minScore = req.query.minScore != null ? parseFloat(req.query.minScore) : undefined;
+    res.json({ query: q, results: await embeddings.semanticSearch(q, limit, minScore) });
+  } catch (e) {
+    console.error('siyuan semantic search failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Default entry point for most searches: fuses full-text (searchNotes) and
+// semantic (semanticSearch) results via reciprocal rank fusion, so an exact
+// term/ID and a paraphrased/conceptual match both surface without the
+// caller having to guess which mode fits a given query up front. See
+// lib/embeddings.js hybridSearch for the fusion method.
+app.get('/siyuan/hybrid-search', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'q required' });
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const minScore = req.query.minScore != null ? parseFloat(req.query.minScore) : undefined;
+    res.json({ query: q, results: await embeddings.hybridSearch(q, limit, minScore) });
+  } catch (e) {
+    console.error('siyuan hybrid search failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Manual trigger to reconcile the embeddings index against the notebook's
+// current state (see lib/embeddings.js syncEmbeddings for what this covers).
+app.post('/siyuan/embeddings-sync', async (req, res) => {
+  try {
+    res.json({ ok: true, ...(await embeddings.syncEmbeddings(!!(req.body && req.body.full))) });
+  } catch (e) {
+    console.error('siyuan embeddings sync failed:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 const fmtTime = new Intl.DateTimeFormat('de-DE', {
   timeZone: DIGEST_TZ, hour: '2-digit', minute: '2-digit',
@@ -1272,12 +1627,13 @@ function weekWindow(refDay) {
 
 async function buildWeeklyData(refDay) {
   const { start, end } = weekWindow(refDay);
-  const [ews, ics, homeDetailed, workDetailed, deckCards] = await Promise.all([
+  const [ews, ics, homeDetailed, workDetailed, deckCards, bikeItems] = await Promise.all([
     EWS_URL ? fetchEwsRange(start, end).catch(() => []) : Promise.resolve([]),
     ICS_URL ? fetchIcsRange(start, end).catch(() => []) : Promise.resolve([]),
     TASKS_HOME_URL ? fetchTasksDetailed(TASKS_HOME_URL).catch(() => []) : Promise.resolve([]),
     TASKS_WORK_URL ? fetchTasksDetailed(TASKS_WORK_URL).catch(() => []) : Promise.resolve([]),
     deck.configured() ? deck.cardsDue(end.toISOString()).catch(() => []) : Promise.resolve([]),
+    bikeMaintenance.getStatus().catch(() => []),
   ]);
   const events = [
     ...ews.map((e) => ({ ...e, cal: 'Arbeit' })),
@@ -1321,11 +1677,14 @@ async function buildWeeklyData(refDay) {
     title: c.title, board: c.board, stack: c.stack,
     due: fmtDue(c.due), overdue: new Date(c.due) < todayStart,
   }));
+  // Keep this lean too: only surface items that actually need attention,
+  // not the whole maintenance list every week.
+  const bikeDue = bikeItems.filter((it) => it.status !== 'Bereit zum Fahren');
 
-  return { start, end, days, homeTasks, workTasks, deck: deckDue, strava, load, ytd };
+  return { start, end, days, homeTasks, workTasks, deck: deckDue, bike: bikeDue, strava, load, ytd };
 }
 
-function renderWeeklyHtml({ start, end, days, homeTasks, workTasks, deck = [], strava, load, ytd }) {
+function renderWeeklyHtml({ start, end, days, homeTasks, workTasks, deck = [], bike = [], strava, load, ytd }) {
   const dayHdrFmt = new Intl.DateTimeFormat('de-DE', { timeZone: DIGEST_TZ, weekday: 'long', day: '2-digit', month: '2-digit' });
   const rangeFmt = new Intl.DateTimeFormat('de-DE', { timeZone: DIGEST_TZ, day: '2-digit', month: '2-digit' });
   const lastDay = new Date(end.getTime() - 86400000);
@@ -1376,11 +1735,18 @@ function renderWeeklyHtml({ start, end, days, homeTasks, workTasks, deck = [], s
     <ul style="margin:8px 0 0;padding-left:20px;font-size:14px;">${deck.map((c) =>
       `<li style="margin:4px 0;">${escapeHtml(c.title)} <span style="color:#9ca3af;font-size:12px;">${escapeHtml(c.board)}${c.stack ? ` / ${escapeHtml(c.stack)}` : ''} &middot; ${dueTag(c.overdue, c.due)}</span></li>`).join('')}</ul>` : '';
 
+  // Bike maintenance block only appears when something's due-soon/overdue
+  // (bikeMaintenance.getStatus is pre-filtered to that in buildWeeklyData).
+  const bikeSection = bike.length ? `
+    <div style="font-size:12px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:#6b7280;margin-top:22px;padding-bottom:5px;border-bottom:2px solid #e5e7eb;">Fahrrad &middot; Wartung fällig</div>
+    <ul style="margin:8px 0 0;padding-left:20px;font-size:14px;">${bike.map((it) =>
+      `<li style="margin:4px 0;">${escapeHtml(it.label)} <span style="color:${it.color};font-weight:600;font-size:12px;">${escapeHtml(it.status)}</span> <span style="color:#9ca3af;font-size:12px;">&middot; ${it.progress}/${it.interval} ${it.unit}</span></li>`).join('')}</ul>` : '';
+
   return `<!doctype html><html><body style="margin:0;background:#f3f4f6;padding:16px 0;">
     <div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2937;max-width:640px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);">
       <div style="background:#1f2937;color:#ffffff;padding:22px 26px;">
         <div style="font-size:21px;font-weight:700;">Deine Woche</div>
-        <div style="font-size:13px;color:#9ca3af;margin-top:3px;">${rangeFmt.format(start)} bis ${rangeFmt.format(lastDay)} &middot; ${eventCount} Termine &middot; ${taskCount} Aufgaben${deck.length ? ` &middot; ${deck.length} Deck-Karten` : ''}</div>
+        <div style="font-size:13px;color:#9ca3af;margin-top:3px;">${rangeFmt.format(start)} bis ${rangeFmt.format(lastDay)} &middot; ${eventCount} Termine &middot; ${taskCount} Aufgaben${deck.length ? ` &middot; ${deck.length} Deck-Karten` : ''}${bike.length ? ` &middot; ${bike.length} Fahrrad-Wartung` : ''}</div>
       </div>
       <div style="padding:6px 26px 26px;">
         ${dayBlocks}
@@ -1389,6 +1755,7 @@ function renderWeeklyHtml({ start, end, days, homeTasks, workTasks, deck = [], s
         ${taskSection('Aufgaben &middot; Arbeit', workTasks)}
         ${taskSection('Aufgaben &middot; Privat', homeTasks)}
         ${deckSection}
+        ${bikeSection}
         <p style="margin-top:26px;color:#cbd5e1;font-size:11px;">Automatisch erstellt von Glance.</p>
       </div>
     </div>
@@ -1403,8 +1770,9 @@ async function sendWeeklyDigest(opts = {}) {
   const eventCount = data.days.reduce((n, d) => n + d.events.length, 0);
   const taskCount = data.workTasks.length + data.homeTasks.length;
   const deckCount = (data.deck || []).length;
-  const subject = `Deine Woche, ${dd(data.start)} bis ${dd(lastDay)} (${eventCount} Termine, ${taskCount} Aufgaben${deckCount ? `, ${deckCount} Deck` : ''})`;
-  if (opts.preview) return { preview: true, subject, html, counts: { events: eventCount, tasks: taskCount, deck: deckCount } };
+  const bikeCount = (data.bike || []).length;
+  const subject = `Deine Woche, ${dd(data.start)} bis ${dd(lastDay)} (${eventCount} Termine, ${taskCount} Aufgaben${deckCount ? `, ${deckCount} Deck` : ''}${bikeCount ? `, ${bikeCount} Fahrrad` : ''})`;
+  if (opts.preview) return { preview: true, subject, html, counts: { events: eventCount, tasks: taskCount, deck: deckCount, bike: bikeCount } };
   if (!WEEKLY_TO) throw new Error('WEEKLY_DIGEST_TO is not set');
   const info = await getMailer().sendMail({ from: SMTP_FROM, to: WEEKLY_TO, subject, html, priority: DIGEST_PRIORITY });
   return { messageId: info.messageId, accepted: info.accepted };
@@ -1494,6 +1862,15 @@ app.get('/deck/stacks', async (req, res) => {
     res.json(await deck.stacks(req.query.board));
   } catch (e) { console.error('deck stacks failed:', e.message); res.status(500).json({ error: e.message }); }
 });
+// Full detail (incl. description) for one card — fetched on demand when the
+// dashboard's edit form opens, since the list endpoint above omits it.
+app.get('/deck/card', async (req, res) => {
+  try {
+    const { boardId, stackId, cardId } = req.query;
+    if (!boardId || !stackId || !cardId) return res.status(400).json({ error: 'boardId, stackId and cardId required' });
+    res.json(await deck.cardDetail({ boardId, stackId, cardId }));
+  } catch (e) { console.error('deck card detail failed:', e.message); res.status(400).json({ error: e.message }); }
+});
 
 // Writes (token-gated by the global POST middleware).
 app.post('/deck/boards', async (req, res) => {
@@ -1511,6 +1888,14 @@ app.post('/deck/cards', async (req, res) => {
 app.post('/deck/delete-card', async (req, res) => {
   try { res.json({ ok: true, ...(await deck.deleteCard(req.body || {})) }); }
   catch (e) { console.error('deck delete card failed:', e.message); res.status(400).json({ error: e.message }); }
+});
+app.post('/deck/update-card', async (req, res) => {
+  try { res.json({ ok: true, ...(await deck.updateCard(req.body || {})) }); }
+  catch (e) { console.error('deck update card failed:', e.message); res.status(400).json({ error: e.message }); }
+});
+app.post('/deck/move-card', async (req, res) => {
+  try { res.json({ ok: true, ...(await deck.moveCard(req.body || {})) }); }
+  catch (e) { console.error('deck move card failed:', e.message); res.status(400).json({ error: e.message }); }
 });
 
 // Open slots on a given day within working hours, given a duration in minutes.
@@ -1597,6 +1982,7 @@ async function rescheduleCalEvent(uid, start, end) {
   const auth = caldavAuth(ICS_USER, ICS_PASS);
   const g = await fetch(eventUrl, { headers: { Authorization: auth } });
   if (!g.ok) throw new Error(`GET event failed: ${g.status}`);
+  const etag = g.headers.get('etag');
   let ics = await g.text();
   const allDay = /^\d{4}-\d{2}-\d{2}$/.test(start);
   let dtstart, dtend;
@@ -1615,9 +2001,13 @@ async function rescheduleCalEvent(uid, start, end) {
   else ics = ics.replace(dtstart, `${dtstart}\r\n${dtend}`);
   const p = await fetch(eventUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': 'text/calendar; charset=utf-8', Authorization: auth },
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8', Authorization: auth,
+      ...(etag ? { 'If-Match': etag } : {}),
+    },
     body: ics,
   });
+  if (p.status === 412) throw new Error('event was modified concurrently — refetch and retry');
   if (!p.ok) throw new Error(`PUT event failed: ${p.status}`);
 }
 
@@ -1635,6 +2025,7 @@ async function updateCalEvent(uid, { start, end, location, summary, description 
   const auth = caldavAuth(ICS_USER, ICS_PASS);
   const g = await fetch(eventUrl, { headers: { Authorization: auth } });
   if (!g.ok) throw new Error(`GET event failed: ${g.status}`);
+  const etag = g.headers.get('etag');
   let ics = await g.text();
 
   if (start) {
@@ -1670,9 +2061,13 @@ async function updateCalEvent(uid, { start, end, location, summary, description 
 
   const p = await fetch(eventUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': 'text/calendar; charset=utf-8', Authorization: auth },
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8', Authorization: auth,
+      ...(etag ? { 'If-Match': etag } : {}),
+    },
     body: ics,
   });
+  if (p.status === 412) throw new Error('event was modified concurrently — refetch and retry');
   if (!p.ok) throw new Error(`PUT event failed: ${p.status}`);
 }
 
@@ -1683,11 +2078,16 @@ async function setTaskDates(calUrl, uid, startDate, endDate) {
   const auth = caldavAuth(TASKS_USER, TASKS_PASS);
   const g = await fetch(taskUrl, { headers: { Authorization: auth } });
   if (!g.ok) throw new Error(`GET task failed: ${g.status}`);
+  const etag = g.headers.get('etag');
   let ics = await g.text();
   const setLine = (name, val) => {
     const line = icsDateProp(name, val);
-    const re = new RegExp(`${name};?[^\\r\\n]*`);
-    if (new RegExp(`^${name}[;:]`, 'm').test(ics)) ics = ics.replace(re, line);
+    // Anchored to line-start (unlike a bare `${name};?[^\r\n]*`, which would
+    // also match the property name appearing as a literal substring
+    // elsewhere — e.g. a task titled "Invoice DUE end of month" would have
+    // its SUMMARY line corrupted instead of its actual DUE line touched).
+    const re = new RegExp(`^${name}[;:][^\\r\\n]*`, 'm');
+    if (re.test(ics)) ics = ics.replace(re, line);
     else ics = ics.replace('END:VTODO', `${line}\r\nEND:VTODO`);
   };
   if (startDate) setLine('DTSTART', startDate);
@@ -1695,9 +2095,13 @@ async function setTaskDates(calUrl, uid, startDate, endDate) {
   ics = reconcileTodoDateTypes(ics);
   const p = await fetch(taskUrl, {
     method: 'PUT',
-    headers: { 'Content-Type': 'text/calendar; charset=utf-8', Authorization: auth },
+    headers: {
+      'Content-Type': 'text/calendar; charset=utf-8', Authorization: auth,
+      ...(etag ? { 'If-Match': etag } : {}),
+    },
     body: ics,
   });
+  if (p.status === 412) throw new Error('task was modified concurrently — refetch and retry');
   if (!p.ok) throw new Error(`PUT task failed: ${p.status}`);
 }
 
@@ -1708,7 +2112,7 @@ app.post('/delete-ics-event', async (req, res) => {
     assertUid(uid);
     if (!CAL_URL) throw new Error('CAL_URL is not set');
     await deleteResource(CAL_URL.replace(/\/$/, '') + `/${uid}.ics`, caldavAuth(ICS_USER, ICS_PASS));
-    icsCache.ts = 0;
+    invalidateCache(icsCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('delete event failed:', err.message);
@@ -1721,7 +2125,7 @@ app.post('/reschedule-ics-event', async (req, res) => {
     const { uid, start, end } = req.body;
     if (!uid || !start) return res.status(400).json({ error: 'uid and start required' });
     await rescheduleCalEvent(uid, start, end);
-    icsCache.ts = 0;
+    invalidateCache(icsCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('reschedule event failed:', err.message);
@@ -1737,7 +2141,7 @@ app.post('/update-ics-event', async (req, res) => {
       return res.status(400).json({ error: 'provide at least one of start, end, location, summary, description' });
     }
     await updateCalEvent(uid, { start, end, location, summary, description });
-    icsCache.ts = 0;
+    invalidateCache(icsCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('update event failed:', err.message);
@@ -1751,7 +2155,7 @@ app.post('/delete-home-task', async (req, res) => {
     if (!uid) return res.status(400).json({ error: 'uid required' });
     assertUid(uid);
     await deleteResource(`${TASKS_HOME_URL.replace('/?export', '')}/${uid}.ics`, caldavAuth(TASKS_USER, TASKS_PASS));
-    homeTasksCache.ts = 0;
+    invalidateCache(homeTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('delete task failed:', err.message);
@@ -1765,7 +2169,7 @@ app.post('/delete-work-task', async (req, res) => {
     if (!uid) return res.status(400).json({ error: 'uid required' });
     assertUid(uid);
     await deleteResource(`${TASKS_WORK_URL.replace('/?export', '')}/${uid}.ics`, caldavAuth(TASKS_USER, TASKS_PASS));
-    workTasksCache.ts = 0;
+    invalidateCache(workTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('delete task failed:', err.message);
@@ -1778,7 +2182,7 @@ app.post('/set-home-task-dates', async (req, res) => {
     const { uid, startDate, endDate, duration } = req.body;
     if (!uid || (!startDate && !endDate && duration == null)) return res.status(400).json({ error: 'uid and startDate, endDate or duration required' });
     await setTaskDates(TASKS_HOME_URL, uid, startDate, resolveTaskEnd({ startDate, endDate, duration }));
-    homeTasksCache.ts = 0;
+    invalidateCache(homeTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('set task dates failed:', err.message);
@@ -1791,11 +2195,69 @@ app.post('/set-work-task-dates', async (req, res) => {
     const { uid, startDate, endDate, duration } = req.body;
     if (!uid || (!startDate && !endDate && duration == null)) return res.status(400).json({ error: 'uid and startDate, endDate or duration required' });
     await setTaskDates(TASKS_WORK_URL, uid, startDate, resolveTaskEnd({ startDate, endDate, duration }));
-    workTasksCache.ts = 0;
+    invalidateCache(workTasksCache);
     res.json({ ok: true });
   } catch (err) {
     console.error('set task dates failed:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ICS export of the Exchange calendar, for external read-only subscription
+// (e.g. Nextcloud's "New subscription"). CalendarView already expands
+// recurring events into individual occurrences within the window, so no
+// RRULE/EXDATE handling is needed here — each occurrence gets its own
+// VEVENT, reusing fetchEwsRange (same low-level query /events itself uses)
+// over a [past, future) window suited to a standing subscription rather than
+// a "what's upcoming" widget.
+//
+// Deliberately NOT gated by the shared X-Api-Token like every other endpoint
+// (see the nginx location for this path) — a subscription client can't send
+// custom headers, so the ?token= query param is the entire access control,
+// same "URL-as-secret" trust model as this proxy's own ICS_URL (Nextcloud's
+// public read share). Unset CALENDAR_FEED_TOKEN disables the route (404, not
+// 403, so an unconfigured deployment doesn't even reveal it exists).
+function buildCalendarFeedIcs(items) {
+  const now = icsStamp(new Date());
+  const lines = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//glance//calendar-feed//EN',
+    'CALSCALE:GREGORIAN', 'X-WR-CALNAME:Exchange (work)',
+  ];
+  for (const it of items) {
+    lines.push('BEGIN:VEVENT');
+    lines.push(`UID:${icsEscape(it.id || `${it.start}-${it.title}`)}@ics-proxy.local`);
+    lines.push(`DTSTAMP:${now}`);
+    lines.push(`DTSTART:${icsStamp(new Date(it.start))}`);
+    if (it.end) lines.push(`DTEND:${icsStamp(new Date(it.end))}`);
+    lines.push(`SUMMARY:${icsEscape(it.title)}`);
+    if (it.location) lines.push(`LOCATION:${icsEscape(it.location)}`);
+    lines.push('END:VEVENT');
+  }
+  lines.push('END:VCALENDAR');
+  return lines.join('\r\n') + '\r\n';
+}
+
+let calendarFeedCache = { ts: 0, data: null };
+async function fetchCalendarFeedItems() {
+  if (calendarFeedCache.data && Date.now() - calendarFeedCache.ts < CACHE_TTL_MS) return calendarFeedCache.data;
+  const start = new Date(Date.now() - CALENDAR_FEED_PAST_DAYS * 86400000);
+  const end = new Date(Date.now() + CALENDAR_FEED_FUTURE_DAYS * 86400000);
+  const data = await fetchEwsRange(start.toISOString(), end.toISOString());
+  calendarFeedCache = { ts: Date.now(), data };
+  return data;
+}
+
+app.get('/calendar-feed.ics', async (req, res) => {
+  if (!CALENDAR_FEED_TOKEN) return res.status(404).send('not found');
+  if (req.query.token !== CALENDAR_FEED_TOKEN) return res.status(403).send('forbidden');
+  try {
+    const items = await fetchCalendarFeedItems();
+    res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+    res.setHeader('Content-Disposition', 'inline; filename="exchange-calendar.ics"');
+    res.send(buildCalendarFeedIcs(items));
+  } catch (err) {
+    console.error('calendar-feed error:', err.message);
+    res.status(500).send('calendar feed error');
   }
 });
 
@@ -1813,20 +2275,19 @@ function mondayOf(yyyymmdd) {
   return dt.toISOString().slice(0, 10);
 }
 
-// Time-in-zone distribution for the most recent activity that has HR data.
-async function latestHrZones(simplified) {
-  const a = simplified.find(x => x.avg_hr != null);
-  if (!a) return null;
+// Time-in-zone distribution for one activity by id. Pure fetch+shape, no
+// "find the right activity" logic -- that's the callers' job (latestHrZones
+// picks the most recent HR-bearing one; buildCoachBriefing calls this per
+// recent activity so each one gets its own breakdown, not just the latest).
+async function zoneDistributionForActivity(id, meta) {
   try {
-    const z = await stravaGet(`/activities/${a.id}/zones`);
+    const z = await stravaGet(`/activities/${id}/zones`);
     const hr = Array.isArray(z) ? z.find(b => b.type === 'heartrate') : null;
     const buckets = hr && hr.distribution_buckets;
     if (!buckets || !buckets.length) return null;
     const total = buckets.reduce((s, b) => s + (b.time || 0), 0) || 1;
     return {
-      activity: a.name,
-      sport: a.sport_type,
-      when: a.when,
+      ...meta,
       zones: buckets.map((b, i) => ({
         zone: `Z${i + 1}`,
         range: b.max > 0 ? `${b.min}-${b.max}` : `${b.min}+`,
@@ -1838,6 +2299,16 @@ async function latestHrZones(simplified) {
     console.error('strava zones failed:', e.message);
     return null;
   }
+}
+
+// Time-in-zone distribution for the most recent activity that has HR data.
+async function latestHrZones(simplified) {
+  const a = simplified.find(x => x.avg_hr != null);
+  if (!a) return null;
+  // id must be in the returned object, not just used to fetch it -- without
+  // it, a caller has no way to drill down further (get_strava_activity,
+  // get_strava_activity_zones) on the exact activity this data is about.
+  return zoneDistributionForActivity(a.id, { id: a.id, activity: a.name, sport: a.sport_type, when: a.when });
 }
 
 // The athlete's configured HR zone boundaries, labeled Z1..Zn.
@@ -1998,10 +2469,20 @@ async function buildStravaYtd() {
 
 // Acute:Chronic Workload Ratio from Relative Effort over the last 28 days.
 // acute = last 7 days total; chronic = average weekly load over 28 days.
-async function buildStravaLoad() {
+// preActs: an already-fetched, already-simplified activity list to reuse
+// instead of making a fresh call (buildCoachBriefing shares one list across
+// several functions this way). The 7/28-day sums are computed from each
+// activity's own timestamp regardless of how the list was fetched, so this
+// is correct as long as the list actually covers the last 28 days -- true
+// for the default fetch below, and true for buildCoachBriefing's shared
+// per_page=100 list for any realistic training frequency.
+async function buildStravaLoad(preActs) {
   const now = Date.now();
-  const after = Math.floor((now - 28 * 86400000) / 1000);
-  const acts = simplifyActivities(await stravaGet(`/athlete/activities?after=${after}&per_page=100`));
+  let acts = preActs;
+  if (!acts) {
+    const after = Math.floor((now - 28 * 86400000) / 1000);
+    acts = simplifyActivities(await stravaGet(`/athlete/activities?after=${after}&per_page=100`));
+  }
   let acute = 0, chronic28 = 0;
   for (const a of acts) {
     const re = a.relative_effort || 0;
@@ -2069,7 +2550,31 @@ function stravaDb() {
     elev_m REAL, avg_hr REAL, max_hr REAL, avg_watts REAL,
     rel_effort INTEGER, kudos INTEGER
   )`);
+  // Added after the table already existed in production, so CREATE TABLE IF
+  // NOT EXISTS above won't add it to a pre-existing file — migrate with an
+  // explicit ALTER, ignoring the "duplicate column" error on a DB that
+  // already has it (no IF NOT EXISTS support for ALTER TABLE ADD COLUMN).
+  try { _db.exec('ALTER TABLE activities ADD COLUMN avg_cadence REAL'); } catch { /* already migrated */ }
   return _db;
+}
+
+// Average speed (km/h) over recent outdoor rides, for deriving ride duration
+// from a distance when the caller doesn't supply one. Excludes e-bike rides
+// (sport LIKE '%EBike%') so an assisted average doesn't skew a normal-bike
+// estimate. Returns null if there's no ride history to derive from.
+function avgCyclingSpeedKmh(sampleSize = 20) {
+  const db = stravaDb();
+  const rows = db.prepare(`
+    SELECT distance_m, moving_s FROM activities
+    WHERE sport LIKE '%Ride%' AND sport NOT LIKE '%EBike%'
+      AND moving_s > 0 AND distance_m > 0
+    ORDER BY start_utc DESC LIMIT ?
+  `).all(sampleSize);
+  if (!rows.length) return null;
+  const totalDist = rows.reduce((s, r) => s + r.distance_m, 0);
+  const totalTime = rows.reduce((s, r) => s + r.moving_s, 0);
+  if (!totalTime) return null;
+  return { kmh: +(totalDist / totalTime * 3.6).toFixed(1), sampleSize: rows.length };
 }
 
 function mapActivityRow(a) {
@@ -2086,6 +2591,7 @@ function mapActivityRow(a) {
     avg_hr: a.average_heartrate ?? null,
     max_hr: a.max_heartrate ?? null,
     avg_watts: a.average_watts ?? null,
+    avg_cadence: a.average_cadence ?? null,
     rel_effort: a.suffer_score ?? null,
     kudos: a.kudos_count ?? null,
   };
@@ -2102,13 +2608,13 @@ async function stravaSync(full) {
     if (row && row.m) after = Math.floor(new Date(row.m).getTime() / 1000) - 3600; // 1h overlap
   }
   const ins = db.prepare(`INSERT INTO activities
-    (id,name,sport,start_utc,start_local,distance_m,moving_s,elapsed_s,elev_m,avg_hr,max_hr,avg_watts,rel_effort,kudos)
-    VALUES (@id,@name,@sport,@start_utc,@start_local,@distance_m,@moving_s,@elapsed_s,@elev_m,@avg_hr,@max_hr,@avg_watts,@rel_effort,@kudos)
+    (id,name,sport,start_utc,start_local,distance_m,moving_s,elapsed_s,elev_m,avg_hr,max_hr,avg_watts,avg_cadence,rel_effort,kudos)
+    VALUES (@id,@name,@sport,@start_utc,@start_local,@distance_m,@moving_s,@elapsed_s,@elev_m,@avg_hr,@max_hr,@avg_watts,@avg_cadence,@rel_effort,@kudos)
     ON CONFLICT(id) DO UPDATE SET
       name=excluded.name, sport=excluded.sport, distance_m=excluded.distance_m,
       moving_s=excluded.moving_s, elapsed_s=excluded.elapsed_s, elev_m=excluded.elev_m,
       avg_hr=excluded.avg_hr, max_hr=excluded.max_hr, avg_watts=excluded.avg_watts,
-      rel_effort=excluded.rel_effort, kudos=excluded.kudos`);
+      avg_cadence=excluded.avg_cadence, rel_effort=excluded.rel_effort, kudos=excluded.kudos`);
   let page = 1, total = 0;
   for (;;) {
     const batch = await stravaGet(`/athlete/activities?after=${after}&per_page=200&page=${page}`);
@@ -2136,11 +2642,15 @@ function seriesLabel(granularity, isoLocal) {
 // Aggregate the stored activities into a labeled series for one metric.
 function stravaSeries({ metric, granularity, from, to, count, offset }) {
   const db = stravaDb();
-  const unit = metric === 'hr' ? 'bpm' : metric === 'distance' ? 'km' : 'Score';
+  const unit = metric === 'hr' ? 'bpm' : metric === 'distance' ? 'km' : metric === 'cadence' ? 'rpm' : 'Score';
+  // hr/cadence are averages (no such thing as "total cadence"), so both null
+  // out an activity that never recorded them rather than counting it as 0.
+  const avgMetric = metric === 'hr' || metric === 'cadence';
+  const col = metric === 'hr' ? 'avg_hr' : metric === 'cadence' ? 'avg_cadence' : null;
   // Per-activity mode: one point per workout (most recent N), not bucketed.
   if (granularity === 'activity') {
-    const ve = metric === 'hr' ? 'avg_hr' : metric === 'distance' ? 'distance_m/1000.0' : 'COALESCE(rel_effort,0)';
-    const wsql = metric === 'hr' ? 'WHERE avg_hr IS NOT NULL' : '';
+    const ve = col || (metric === 'distance' ? 'distance_m/1000.0' : 'COALESCE(rel_effort,0)');
+    const wsql = avgMetric ? `WHERE ${col} IS NOT NULL` : '';
     const lim = Math.min(count > 0 ? count : 12, 200);
     const off = offset > 0 ? offset : 0;
     const rows = db.prepare(`SELECT start_local ms, ${ve} val FROM activities ${wsql} ORDER BY start_utc DESC LIMIT ${lim} OFFSET ${off}`).all();
@@ -2150,13 +2660,17 @@ function stravaSeries({ metric, granularity, from, to, count, offset }) {
   const bucket = granularity === 'day' ? `strftime('%Y-%m-%d', start_local)`
     : granularity === 'year' ? `strftime('%Y', start_local)`
     : granularity === 'month' ? `strftime('%Y-%m', start_local)`
-    : `strftime('%Y-%W', start_local)`; // week, Monday-based
+    // Monday-anchored week-start date via date arithmetic — NOT
+    // strftime('%Y-%W', ...), which resets the week number to 00 on Jan 1
+    // regardless of weekday, splitting a week that spans Dec 31 -> Jan 1
+    // into two separate buckets (two chart bars for one real training week).
+    : `date(start_local, '-' || ((CAST(strftime('%w', start_local) AS INTEGER) + 6) % 7) || ' days')`;
   let valExpr;
-  if (metric === 'hr') valExpr = 'AVG(avg_hr)';
+  if (col) valExpr = `AVG(${col})`;
   else if (metric === 'distance') valExpr = 'SUM(distance_m)/1000.0';
   else valExpr = 'SUM(COALESCE(rel_effort,0))';
   const where = [], params = {};
-  if (metric === 'hr') where.push('avg_hr IS NOT NULL');
+  if (avgMetric) where.push(`${col} IS NOT NULL`);
   if (from) { where.push('start_utc >= @from'); params.from = from; }
   if (to) { where.push('start_utc <= @to'); params.to = to; }
   const wsql = where.length ? 'WHERE ' + where.join(' AND ') : '';
@@ -2206,10 +2720,12 @@ app.get('/strava/gear', (req, res) =>
 app.get('/strava/gear/:id', (req, res) =>
   stravaCached(`gear/${req.params.id}`, () => stravaGet(`/gear/${encodeURIComponent(req.params.id)}`), res));
 
-// get_activity_performance. Detailed activity: HR/watts, calories, laps,
-// segment_efforts, best_efforts, achievements.
+// get_activity_performance. Detailed activity: HR/watts/cadence, calories,
+// effort, elevation range, environment, location, gear, route, laps,
+// segment_efforts, achievements. Trimmed by simplifyActivity (drops social
+// counters and account/visibility flags).
 app.get('/strava/activity/:id', (req, res) =>
-  stravaCached(`activity/${req.params.id}`, () => stravaGet(`/activities/${encodeURIComponent(req.params.id)}`), res));
+  stravaCached(`activity/${req.params.id}`, () => stravaGet(`/activities/${encodeURIComponent(req.params.id)}`).then(simplifyActivity), res));
 
 // get_activity_streams. Query: keys (csv), resolution (low|medium|high).
 app.get('/strava/activity/:id/streams', (req, res) => {
@@ -2241,11 +2757,11 @@ app.get('/strava/ytd', (req, res) => stravaCached('ytd', buildStravaYtd, res));
 app.get('/strava/load', (req, res) => stravaCached('load', buildStravaLoad, res));
 
 // DB-backed time series for the customizable charts. Reads SQLite directly
-// (fast, no Strava call). metric: hr|effort|distance; granularity: day|week|month.
+// (fast, no Strava call). metric: hr|effort|distance|cadence; granularity: day|week|month.
 app.get('/strava/series', (req, res) => {
   if (!Database) return res.status(503).json({ error: 'database unavailable' });
   try {
-    const metric = ['hr', 'effort', 'distance'].includes(req.query.metric) ? req.query.metric : 'distance';
+    const metric = ['hr', 'effort', 'distance', 'cadence'].includes(req.query.metric) ? req.query.metric : 'distance';
     const granularity = ['day', 'week', 'month', 'year', 'activity'].includes(req.query.granularity) ? req.query.granularity : 'week';
     let from = req.query.from, to = req.query.to;
     if (from && from.length === 10) from = from + 'T00:00:00Z';
@@ -2449,10 +2965,15 @@ function healthLatestAndBaseline(metric, baselineDays = 14) {
 
 // A simple "hard / easy / rest" recommendation from training load and the
 // morning recovery signals. Score starts at 100 and each stressor deducts.
-async function buildReadiness() {
-  const load = await buildStravaLoad().catch(() => null);
-  let acts = [];
-  try { acts = simplifyActivities(await stravaGet('/athlete/activities?per_page=15')); } catch { /* best effort */ }
+// preActs: reuse an already-fetched list instead of this function's own
+// fetch, and pass it straight through to buildStravaLoad too -- see its
+// comment. Default (no preActs) behavior is unchanged for other callers.
+async function buildReadiness(preActs) {
+  let acts = preActs;
+  if (!acts) {
+    try { acts = simplifyActivities(await stravaGet('/athlete/activities?per_page=15')); } catch { acts = []; }
+  }
+  const load = await buildStravaLoad(preActs).catch(() => null);
   const last = acts[0];
   const daysSinceLast = last && last.start ? Math.floor((Date.now() - new Date(last.start).getTime()) / 86400000) : null;
   const rhr = healthLatestAndBaseline('resting_hr');
@@ -2513,6 +3034,157 @@ async function buildReadiness() {
 }
 
 app.get('/strava/readiness', (req, res) => stravaCached('readiness', buildReadiness, res));
+
+// --- Cycling training planner -----------------------------------------------
+// Given a start + destination (+ either a duration or a distance), builds a
+// weather-aware packing list and a carb/gel target for the ride. Read-only:
+// returns a descriptionDraft meant to be handed to create_event/create_task
+// as-is, so the actual calendar write still goes through the normal
+// confirm-then-POST flow rather than this endpoint writing anything itself.
+const CARBS_PER_HOUR_G = 60;
+const GEL_CARBS_G = 25;
+// Straight-line distance is a poor proxy for an actual road route; this rough
+// multiplier turns it into a distance estimate when the caller gives neither
+// distanceKm nor durationMinutes. It is NOT a real route (no roads/elevation),
+// just a fallback so the tool still works with only a start + destination.
+const ROUTE_DISTANCE_FACTOR = 1.3;
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Packing list needs to cover both ends of the ride, so combine the worse
+// condition from each leg (colder low, hotter high, wetter, windier) rather
+// than just looking at the destination.
+function worstCaseWeather(a, b) {
+  if (!b) return a;
+  return {
+    tempMin: Math.min(a.tempMin, b.tempMin),
+    tempMax: Math.max(a.tempMax, b.tempMax),
+    precip: Math.max(a.precip, b.precip),
+    precipProb: Math.max(a.precipProb ?? 0, b.precipProb ?? 0),
+    windMax: Math.max(a.windMax, b.windMax),
+  };
+}
+
+function cyclingPackingList(w) {
+  const list = ['Helmet', 'Phone + ID', 'Water bottles', 'Repair kit (spare tube, tire levers, mini pump/CO2, multitool)'];
+  const tempMin = w.tempMin, tempMax = w.tempMax;
+  const wet = (w.precipProb != null && w.precipProb >= 40) || w.precip >= 1;
+
+  if (tempMin < 5) list.push('Thermal jacket', 'Thermal gloves', 'Shoe covers', 'Neck warmer/buff');
+  else if (tempMin < 10) list.push('Arm & leg warmers', 'Light jacket', 'Full-finger gloves');
+  else if (tempMin < 15) list.push('Arm warmers or light vest', 'Light gloves');
+
+  if (tempMax > 25) list.push('Extra water bottle', 'Sunscreen', 'Lightweight/breathable jersey');
+
+  if (wet) {
+    list.push('Rain jacket', 'Waterproof shoe covers');
+    if (tempMin < 12) list.push('Extra dry layer (cold + wet risks a big chill on descents)');
+  }
+
+  if (w.windMax >= 30) list.push('Windbreaker vest (strong wind expected)');
+
+  return list;
+}
+
+function cyclingNutritionPlan(durationMinutes) {
+  if (durationMinutes < 60) {
+    return {
+      carbsPerHour: CARBS_PER_HOUR_G, gelCarbsG: GEL_CARBS_G,
+      totalCarbsG: 0, gelsNeeded: 0,
+      note: 'Under an hour — water is enough, no gels needed.',
+    };
+  }
+  const totalCarbsG = Math.round(CARBS_PER_HOUR_G * (durationMinutes / 60));
+  const gelsNeeded = Math.ceil(totalCarbsG / GEL_CARBS_G);
+  return {
+    carbsPerHour: CARBS_PER_HOUR_G, gelCarbsG: GEL_CARBS_G, totalCarbsG, gelsNeeded,
+    note: `~${totalCarbsG}g carbs total → ~${gelsNeeded} gel(s) @ ${GEL_CARBS_G}g, spaced through the ride.`,
+  };
+}
+
+app.get('/plan-cycling-training', async (req, res) => {
+  try {
+    const destinationQ = String(req.query.destination || '').trim();
+    if (!destinationQ) return res.status(400).json({ error: 'destination required' });
+    const startQ = String(req.query.start || '').trim();
+    const date = req.query.date || berlinDay(new Date());
+
+    const [startLoc, destLoc] = await Promise.all([
+      startQ ? weather.geocodePlace(startQ) : weather.resolveLocation({}),
+      weather.geocodePlace(destinationQ),
+    ]);
+    const [startWeather, destWeather] = await Promise.all([
+      weather.weatherCached(date, startLoc),
+      weather.weatherCached(date, destLoc),
+    ]);
+
+    let durationMinutes = req.query.durationMinutes ? Number(req.query.durationMinutes) : null;
+    let distanceKm = req.query.distanceKm ? Number(req.query.distanceKm) : null;
+    let distanceSource = distanceKm ? 'given' : null;
+    let avgSpeedKmh = req.query.avgSpeedKmh ? Number(req.query.avgSpeedKmh) : null;
+    let speedSource = avgSpeedKmh ? 'given' : null;
+    let straightLineKm = null;
+
+    if (durationMinutes == null || isNaN(durationMinutes)) {
+      if (distanceKm == null || isNaN(distanceKm)) {
+        straightLineKm = haversineKm(
+          parseFloat(startLoc.lat), parseFloat(startLoc.lon),
+          parseFloat(destLoc.lat), parseFloat(destLoc.lon),
+        );
+        distanceKm = +(straightLineKm * ROUTE_DISTANCE_FACTOR).toFixed(1);
+        distanceSource = `estimated from straight-line start→destination distance (${straightLineKm.toFixed(1)}km) × ${ROUTE_DISTANCE_FACTOR} — not a real route`;
+      }
+      if (avgSpeedKmh == null || isNaN(avgSpeedKmh)) {
+        const avg = avgCyclingSpeedKmh();
+        if (!avg) return res.status(400).json({ error: 'no ride history to derive avgSpeedKmh from — provide avgSpeedKmh or durationMinutes' });
+        avgSpeedKmh = avg.kmh;
+        speedSource = `strava average (last ${avg.sampleSize} rides)`;
+      }
+      durationMinutes = Math.round((distanceKm / avgSpeedKmh) * 60);
+    }
+    if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+      return res.status(400).json({ error: 'invalid duration' });
+    }
+
+    const combinedWeather = worstCaseWeather(destWeather, startWeather);
+    const packingList = cyclingPackingList(combinedWeather);
+    const nutrition = cyclingNutritionPlan(durationMinutes);
+
+    const hours = Math.floor(durationMinutes / 60), mins = durationMinutes % 60;
+    const durationLabel = hours ? `${hours}h${mins ? ` ${mins}m` : ''}` : `${mins}m`;
+    const fmtWeather = (w) => `${w.text} ${w.emoji}, ${w.tempMin}–${w.tempMax}°C, precip ${w.precipProb ?? 0}%, wind ${w.windMax}km/h`;
+    const descriptionDraft = [
+      `Route: ${startLoc.place} → ${destLoc.place}`,
+      `Weather at start (${startLoc.place}): ${fmtWeather(startWeather)}`,
+      `Weather at destination (${destLoc.place}): ${fmtWeather(destWeather)}`,
+      `Duration: ${durationLabel}${distanceKm ? ` (~${distanceKm}km @ ~${avgSpeedKmh}km/h)` : ''}`,
+      '',
+      'Pack:',
+      ...packingList.map((i) => `- ${i}`),
+      '',
+      `Nutrition: ${nutrition.note}`,
+    ].join('\n');
+
+    res.json({
+      start: startLoc.place, destination: destLoc.place, date,
+      straightLineKm: straightLineKm != null ? +straightLineKm.toFixed(1) : null,
+      weather: { start: startWeather, destination: destWeather },
+      duration: { minutes: durationMinutes, label: durationLabel },
+      distanceKm: distanceKm ?? null, distanceSource,
+      avgSpeedKmh: avgSpeedKmh ?? null, speedSource,
+      packingList, nutrition, descriptionDraft,
+    });
+  } catch (err) {
+    console.error('plan-cycling-training failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // --- Calendar load vs training correlation ---------------------------------
 // Per-week work-meeting hours (Exchange) alongside training volume/effort
@@ -2621,6 +3293,72 @@ app.get('/task-triage', async (req, res) => {
   }
 });
 
+// --- Proactive ntfy alerts ---------------------------------------------------
+// Bike maintenance gone overdue, tasks overdue/due soon, Deck cards due —
+// things worth a push instead of waiting for the next digest email. Skips
+// sending entirely when nothing needs attention, so it stays occasional
+// rather than a daily ping regardless of content.
+async function buildAlertSections() {
+  const sections = [];
+
+  const bike = await bikeMaintenance.getStatus().catch(() => []);
+  const bikeDue = bike.filter((it) => it.status !== 'Bereit zum Fahren');
+  if (bikeDue.length) {
+    sections.push([
+      '🚲 Fahrrad-Wartung',
+      ...bikeDue.map((it) => `• ${it.label}: ${it.status}, ${it.progress}/${it.interval} ${it.unit}`),
+    ].join('\n'));
+  }
+
+  const triage = await buildTaskTriage(3).catch(() => null);
+  if (triage) {
+    const overdue = [...triage.home.overdue, ...triage.work.overdue];
+    const dueSoon = [...triage.home.due_soon, ...triage.work.due_soon];
+    if (overdue.length) {
+      sections.push([`✅ Überfällige Aufgaben (${overdue.length})`, ...overdue.map((t) => `• ${t.title}`)].join('\n'));
+    }
+    if (dueSoon.length) {
+      sections.push([`⏳ Bald fällig (${dueSoon.length})`, ...dueSoon.map((t) => `• ${t.title}`)].join('\n'));
+    }
+  }
+
+  if (deck.configured()) {
+    const end = new Date(Date.now() + 3 * 86400000);
+    const deckDue = await deck.cardsDue(end.toISOString()).catch(() => []);
+    if (deckDue.length) {
+      sections.push([`📋 Deck fällig (${deckDue.length})`, ...deckDue.map((c) => `• ${c.title}`)].join('\n'));
+    }
+  }
+
+  return sections;
+}
+
+async function sendAlerts() {
+  const sections = await buildAlertSections();
+  if (!sections.length) return { sent: false, reason: 'nothing to report' };
+  await ntfy.send({
+    title: 'Fällig / überfällig',
+    message: sections.join('\n\n'),
+    tags: 'rotating_light',
+    priority: 4,
+  });
+  return { sent: true, sections: sections.length };
+}
+
+// Manual trigger for testing, mirrors /send-digest. Body optional; `preview:
+// true` returns the composed sections without pushing to ntfy.
+app.post('/send-alerts', async (req, res) => {
+  try {
+    if (req.body && req.body.preview) {
+      return res.json({ preview: true, sections: await buildAlertSections() });
+    }
+    res.json({ ok: true, ...(await sendAlerts()) });
+  } catch (err) {
+    console.error('send-alerts failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --- Conflict check ---------------------------------------------------------
 // Events across both calendars that overlap a proposed [start, end) slot.
 app.get('/check-conflicts', async (req, res) => {
@@ -2637,6 +3375,67 @@ app.get('/check-conflicts', async (req, res) => {
     res.json({ start: s.toISOString(), end: e.toISOString(), hasConflict: conflicts.length > 0, conflicts });
   } catch (err) {
     console.error('check-conflicts failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Duplicate/orphan event check -------------------------------------------
+// Meant to be called right after creating or rescheduling an event, to catch
+// two classes of self-inflicted mistakes: an accidental double-create, or a
+// manual "move" (create new + forgot to delete old) that left the original
+// behind. Flags events with the same normalized title whose times overlap or
+// sit within DUPLICATE_NEAR_MINUTES of each other, across both calendars.
+const DUPLICATE_NEAR_MINUTES = 15;
+
+function normalizeEventTitle(s) {
+  return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function findDuplicateEvents(events) {
+  const items = events
+    .map((e) => ({ ...e, _title: normalizeEventTitle(e.title), _start: new Date(e.start).getTime() }))
+    .filter((e) => e._title && !isNaN(e._start))
+    .map((e) => ({ ...e, _end: e.end ? new Date(e.end).getTime() : e._start }));
+
+  const groups = [];
+  const used = new Set();
+  for (let i = 0; i < items.length; i++) {
+    if (used.has(i)) continue;
+    const a = items[i];
+    const cluster = [a];
+    for (let j = i + 1; j < items.length; j++) {
+      if (used.has(j)) continue;
+      const b = items[j];
+      if (b._title !== a._title) continue;
+      const overlaps = a._start < b._end && b._start < a._end;
+      const nearMs = DUPLICATE_NEAR_MINUTES * 60000;
+      const near = Math.min(
+        Math.abs(a._start - b._start),
+        Math.abs(a._start - b._end),
+        Math.abs(a._end - b._start),
+      ) <= nearMs;
+      if (overlaps || near) { cluster.push(b); used.add(j); }
+    }
+    if (cluster.length > 1) {
+      used.add(i);
+      groups.push(cluster.map((e) => ({
+        cal: e.cal, title: e.title, start: e.start, end: e.end || null,
+        location: e.location || null, id: e.id || null, uid: e.uid || null,
+      })));
+    }
+  }
+  return groups;
+}
+
+app.get('/check-duplicates', async (req, res) => {
+  try {
+    const { date, from, to } = req.query;
+    if (!date && !(from && to)) return res.status(400).json({ error: 'provide date=YYYY-MM-DD or from & to' });
+    const { events } = await buildAgenda({ date, from, to });
+    const duplicates = findDuplicateEvents(events);
+    res.json({ hasDuplicates: duplicates.length > 0, duplicates });
+  } catch (err) {
+    console.error('check-duplicates failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2690,10 +3489,231 @@ async function commitDayPlan(blocks) {
 app.post('/plan-day', async (req, res) => {
   try {
     const created = await commitDayPlan((req.body || {}).blocks);
-    homeTasksCache.ts = 0; workTasksCache.ts = 0;
+    invalidateCache(homeTasksCache); invalidateCache(workTasksCache);
     res.json({ ok: true, created });
   } catch (err) {
     console.error('commit plan-day failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Coach briefing ----------------------------------------------------
+// Data bundle combining training load/recovery signals with the day's
+// calendar/task load, so a single call answers "how should today (and
+// this training block) go". Same philosophy as plan-day/plan-cycling-
+// training: bundle facts + a couple of cheap derived flags here, leave
+// the actual coaching narrative (the wording, the recommendation, the
+// written report) to whoever calls this. Read-only.
+async function buildCoachBriefing(date) {
+  const day = date || berlinDay(new Date());
+  // One shared activity list feeds readiness (its own ACWR calc + "days
+  // since last"), load, and recentActivities -- these used to be 4 separate
+  // /athlete/activities calls (buildStravaLoad's own fetch, buildReadiness's
+  // own fetch, a duplicate direct buildStravaLoad() call, and recentRaw's
+  // fetch), 2 of which were the literal same request run twice. per_page=100
+  // with no age filter comfortably covers the 28-day ACWR window and the
+  // last-10-for-recentActivities need in one call, for any realistic
+  // training frequency.
+  const sharedActs = await stravaGet('/athlete/activities?per_page=100').then(simplifyActivities).catch(() => []);
+
+  const [readiness, load, ytd, agenda, triage, weatherData, bikeStatus, hrZones] = await Promise.all([
+    buildReadiness(sharedActs).catch(() => null),
+    buildStravaLoad(sharedActs).catch(() => null),
+    buildStravaYtd().catch(() => null),
+    buildAgenda({ date: day }).catch(() => ({ events: [], tasks: { home: [], work: [] } })),
+    buildTaskTriage().catch(() => null),
+    weatherForRequest(day, {}).catch(() => null),
+    bikeMaintenance.getStatus().catch(() => []),
+    // The athlete's configured Z1..Z5 bpm ranges -- without these, an avg_hr
+    // or a get_strava_activity_zones time-in-zone number has nothing to be
+    // read against.
+    hrZoneBoundaries().catch(() => null),
+  ]);
+  const recentRaw = sharedActs;
+  let weeklyTrend = null;
+  try {
+    // Only the multi-week trend stays DB-backed -- aggregating 8 weeks
+    // needs history a 10-item live fetch can't cover, so this is the one
+    // piece that can lag behind a stalled sync cron.
+    weeklyTrend = {
+      distanceKm: stravaSeries({ metric: 'distance', granularity: 'week', count: 8 }),
+      effort: stravaSeries({ metric: 'effort', granularity: 'week', count: 8 }),
+      cadence: stravaSeries({ metric: 'cadence', granularity: 'week', count: 8 }),
+    };
+  } catch { /* DB unavailable, leave null */ }
+
+  // Per-session execution detail (HR, power, cadence, tempo/pace, climbing),
+  // not just aggregate scores -- how the last few sessions were actually
+  // ridden/run, not just how much load they added. Sourced from recentRaw
+  // above (live), so this is always current, never DB-lag-affected.
+  const recentActivities = recentRaw.slice(0, 5).map((a) => {
+    const hasPace = a.distance_km && a.moving_time_s && /run|walk/i.test(a.sport_type || '');
+    return {
+      id: a.id,
+      name: a.name,
+      sport: a.sport_type,
+      when: a.start_local,
+      distance_km: a.distance_km,
+      moving_time_s: a.moving_time_s,
+      elevation_gain_m: a.elevation_gain_m,
+      avg_hr: a.avg_hr,
+      max_hr: a.max_hr,
+      avg_watts: a.avg_watts,
+      avg_cadence: a.avg_cadence,
+      avg_speed_kmh: a.avg_speed_kmh,
+      pace_min_per_km: hasPace ? +((a.moving_time_s / 60) / a.distance_km).toFixed(2) : null,
+      relative_effort: a.relative_effort,
+    };
+  });
+  // Zone-time breakdown for every recent activity that has HR data, not
+  // just the single most recent one -- one live Strava call per activity
+  // (up to 5), run concurrently. Cheap enough for an interactive coaching
+  // call (not a polled endpoint), and each one gets attached to its own
+  // recentActivities entry so "how was each of the last few sessions
+  // actually run" doesn't stop at averages.
+  await Promise.all(recentActivities.map(async (act) => {
+    if (act.avg_hr == null) return;
+    const dist = await zoneDistributionForActivity(act.id, {});
+    act.hrZones = dist ? dist.zones : null;
+  }));
+
+  // The most recent HR-bearing activity is, in the common case, already one
+  // of the 5 above -- reuse its hrZones instead of a second live zone call
+  // for the same activity. Only falls back to a fresh lookup if it isn't
+  // (e.g. after a run of several non-HR activities pushed it past index 5).
+  const firstHr = recentActivities.find((a) => a.avg_hr != null);
+  const latestZones = firstHr
+    ? { id: firstHr.id, activity: firstHr.name, sport: firstHr.sport, when: firstHr.when, zones: firstHr.hrZones || null }
+    : await latestHrZones(recentRaw).catch(() => null);
+
+  // Cheap derived flags, computed once here rather than by every caller.
+  const meetingHours = agenda.events
+    .filter((e) => e.cal === 'work' && e.end)
+    .reduce((t, e) => t + (new Date(e.end) - new Date(e.start)) / 3600000, 0);
+
+  return {
+    date: day,
+    readiness,
+    load,
+    ytd,
+    weeklyTrend,
+    recentActivities,
+    hrZoneBoundaries: hrZones,
+    latestActivityHrZones: latestZones,
+    weather: weatherData,
+    calendar: { meetingHours: +meetingHours.toFixed(1), eventCount: agenda.events.length },
+    tasks: triage,
+    bikeMaintenanceDue: (bikeStatus || []).filter((i) => i.status !== 'Bereit zum Fahren'),
+  };
+}
+
+app.get('/coach-briefing', async (req, res) => {
+  try {
+    res.json(await buildCoachBriefing(req.query.date));
+  } catch (err) {
+    console.error('coach-briefing failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Full-detail training data for an arbitrary date range -- "look at
+// everything from 17 July to now" style requests, not just the last 5
+// activities coach_briefing carries. Per-activity detail and the weekly
+// trend are DB-only (cheap, any range length); real zone-time is fetched
+// live for only the hardest/longest/most-recent activity in the range
+// (bounded to 3 calls regardless of range length) so a multi-week range
+// can't repeat the rate-limit hit that came from doing this per-activity
+// for all 5 in coach_briefing. Every other activity gets a cheap
+// average-HR-based zone label instead (hrZoneAvg) -- which zone the
+// activity's *average* HR falls in, not true time-in-zone.
+function hrZoneForValue(hr, boundaries) {
+  if (hr == null || !boundaries) return null;
+  for (const z of boundaries) {
+    const top = z.range.endsWith('+');
+    const [lo, hi] = z.range.replace('+', '').split('-').map(Number);
+    if (hr >= lo && (top || hr <= hi)) return z.zone;
+  }
+  return null;
+}
+
+async function buildCoachRange(fromStr, toStr) {
+  const fromIso = fromStr.length === 10 ? `${fromStr}T00:00:00Z` : fromStr;
+  const toIso = toStr.length === 10 ? `${toStr}T23:59:59Z` : toStr;
+
+  const boundaries = await hrZoneBoundaries().catch(() => null);
+  const rows = stravaDb().prepare(`
+    SELECT id, name, sport, start_local, distance_m, moving_s, elev_m, avg_hr, max_hr, avg_watts, avg_cadence, rel_effort
+    FROM activities WHERE start_utc >= ? AND start_utc <= ? ORDER BY start_utc ASC
+  `).all(fromIso, toIso);
+
+  const activities = rows.map((r) => {
+    const km = r.distance_m != null ? r.distance_m / 1000 : null;
+    const hasPace = km && r.moving_s && /run|walk/i.test(r.sport || '');
+    return {
+      id: r.id,
+      name: r.name,
+      sport: r.sport,
+      when: r.start_local,
+      distance_km: km != null ? +km.toFixed(2) : null,
+      moving_time_s: r.moving_s,
+      elevation_gain_m: r.elev_m,
+      avg_hr: r.avg_hr,
+      max_hr: r.max_hr,
+      avg_watts: r.avg_watts,
+      avg_cadence: r.avg_cadence,
+      avg_speed_kmh: km && r.moving_s ? +(km / (r.moving_s / 3600)).toFixed(1) : null,
+      pace_min_per_km: hasPace ? +((r.moving_s / 60) / km).toFixed(2) : null,
+      relative_effort: r.rel_effort,
+      hrZoneAvg: hrZoneForValue(r.avg_hr, boundaries),
+    };
+  });
+
+  // Notable sessions get real zone-time; everyone else keeps hrZoneAvg only.
+  const withHr = activities.filter((a) => a.avg_hr != null);
+  const notable = [];
+  if (withHr.length) {
+    const hardest = [...withHr].sort((a, b) => (b.relative_effort || 0) - (a.relative_effort || 0))[0];
+    const longest = [...withHr].sort((a, b) => (b.moving_time_s || 0) - (a.moving_time_s || 0))[0];
+    const latest = withHr[withHr.length - 1];
+    for (const a of [hardest, longest, latest]) if (a && !notable.includes(a)) notable.push(a);
+  }
+  await Promise.all(notable.map(async (a) => {
+    const dist = await zoneDistributionForActivity(a.id, {});
+    a.hrZones = dist ? dist.zones : null;
+  }));
+
+  let weeklyTrend = null;
+  try {
+    weeklyTrend = {
+      distanceKm: stravaSeries({ metric: 'distance', granularity: 'week', from: fromIso, to: toIso }),
+      effort: stravaSeries({ metric: 'effort', granularity: 'week', from: fromIso, to: toIso }),
+      cadence: stravaSeries({ metric: 'cadence', granularity: 'week', from: fromIso, to: toIso }),
+      hr: stravaSeries({ metric: 'hr', granularity: 'week', from: fromIso, to: toIso }),
+    };
+  } catch { /* DB unavailable */ }
+
+  const totals = activities.reduce((t, a) => {
+    t.count += 1;
+    t.km += a.distance_km || 0;
+    t.hours += (a.moving_time_s || 0) / 3600;
+    t.elevation_m += a.elevation_gain_m || 0;
+    t.effort += a.relative_effort || 0;
+    return t;
+  }, { count: 0, km: 0, hours: 0, elevation_m: 0, effort: 0 });
+  totals.km = +totals.km.toFixed(1);
+  totals.hours = +totals.hours.toFixed(1);
+  totals.elevation_m = Math.round(totals.elevation_m);
+
+  return { from: fromStr, to: toStr, totals, hrZoneBoundaries: boundaries, weeklyTrend, activities };
+}
+
+app.get('/coach-range', async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ error: 'provide from and to (YYYY-MM-DD)' });
+    res.json(await buildCoachRange(from, to));
+  } catch (err) {
+    console.error('coach-range failed:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2724,6 +3744,13 @@ async function buildStatus() {
     daily: { enabled: DIGEST_ENABLED, cron: DIGEST_CRON, tz: DIGEST_TZ, configured: !!(SMTP_HOST && DIGEST_TO) },
     weekly: { enabled: WEEKLY_ENABLED, cron: WEEKLY_CRON, tz: DIGEST_TZ, configured: !!(SMTP_HOST && WEEKLY_TO) },
   };
+  status.ntfy = { configured: ntfy.configured(), cron: DIGEST_CRON, tz: DIGEST_TZ };
+  status.embeddings = {
+    configured: !!Database && siyuan.isConfigured(),
+    lastSync: { ...embeddings.getSyncStatus(), atLabel: stampLabel(embeddings.getSyncStatus().at) },
+    indexedNotes: null,
+  };
+  if (Database) { try { status.embeddings.indexedNotes = embeddings.embeddingsDb().prepare('SELECT COUNT(DISTINCT docId) c FROM note_chunks').get().c; } catch { /* ignore */ } }
   status.health = { configured: !!Database, lastIngest: null };
   if (Database) {
     try {
@@ -2789,6 +3816,19 @@ app.listen(PORT, () => {
     }
   }
 
+  if (ntfy.configured()) {
+    if (!cron.validate(DIGEST_CRON)) {
+      console.error(`ntfy alerts disabled: invalid DIGEST_CRON "${DIGEST_CRON}"`);
+    } else {
+      cron.schedule(DIGEST_CRON, () => {
+        sendAlerts()
+          .then((r) => console.log('ntfy alerts:', r.sent ? `sent (${r.sections} sections)` : r.reason))
+          .catch((err) => console.error('ntfy alerts failed:', err.message));
+      }, { timezone: DIGEST_TZ });
+      console.log(`ntfy alerts scheduled: "${DIGEST_CRON}" ${DIGEST_TZ}`);
+    }
+  }
+
   if (WEEKLY_ENABLED) {
     if (!cron.validate(WEEKLY_CRON)) {
       console.error(`weekly digest disabled: invalid WEEKLY_DIGEST_CRON "${WEEKLY_CRON}"`);
@@ -2796,9 +3836,11 @@ app.listen(PORT, () => {
       console.error('weekly digest disabled: SMTP_HOST and WEEKLY_DIGEST_TO must be set');
     } else {
       cron.schedule(WEEKLY_CRON, () => {
-        // Recap the completed week: anchor on yesterday so a Monday send covers last Mon-Sun.
-        const ref = berlinDay(new Date(Date.now() - 86400000));
-        sendWeeklyDigest({ ref })
+        // Events/tasks preview the week containing today (a Monday send ->
+        // this Mon-Sun). Strava's own recap block is coded as start-7/end-7,
+        // which lands on last week as intended, matching its "Letzte Woche
+        // Training" heading.
+        sendWeeklyDigest()
           .then((r) => console.log(`weekly digest sent to ${WEEKLY_TO}:`, r.messageId))
           .catch((err) => console.error('weekly digest send failed:', err.message));
       }, { timezone: DIGEST_TZ });
@@ -2825,6 +3867,7 @@ app.listen(PORT, () => {
         warm('ytd', buildStravaYtd);
         warm('load', buildStravaLoad);
         warm('readiness', buildReadiness);
+        warm('gear', () => stravaGet('/athlete').then((a) => ({ bikes: a.bikes || [], shoes: a.shoes || [] })));
       };
       warmAll();
       cron.schedule('*/30 * * * *', () => {
@@ -2836,6 +3879,27 @@ app.listen(PORT, () => {
       console.log('strava db sync scheduled: every 30 min');
     } catch (e) {
       console.error('strava db init failed:', e.message);
+    }
+  }
+
+  // Semantic search index: backfill on first boot, then reconcile hourly for
+  // notes changed directly in the SiYuan UI (writes made via our own
+  // create/update/delete-note routes are already re-embedded synchronously,
+  // see the siyuan routes above — this cron is just the catch-all).
+  if (Database && siyuan.isConfigured()) {
+    try {
+      const count = embeddings.embeddingsDb().prepare('SELECT COUNT(*) c FROM note_chunks').get().c;
+      embeddings.syncEmbeddings(count === 0)
+        .then(r => console.log(`embeddings sync (${count === 0 ? 'backfill' : 'incremental'}):`, JSON.stringify(r)))
+        .catch(e => console.error('embeddings sync failed:', e.message));
+      cron.schedule('0 * * * *', () => {
+        embeddings.syncEmbeddings(false)
+          .then(r => console.log('embeddings sync:', JSON.stringify(r)))
+          .catch(e => console.error('embeddings sync failed:', e.message));
+      }, { timezone: DIGEST_TZ });
+      console.log('embeddings sync scheduled: hourly');
+    } catch (e) {
+      console.error('embeddings db init failed:', e.message);
     }
   }
 });

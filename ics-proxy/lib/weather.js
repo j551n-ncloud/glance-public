@@ -61,8 +61,8 @@ module.exports = function createWeather({ berlinDay }) {
     try {
       return await geocodePlace(WEATHER_PLACE);
     } catch (e) {
-      console.error(`geocoding WEATHER_PLACE "${WEATHER_PLACE}" failed, using Berlin:`, e.message);
-      return coordLoc({ lat: '52.52', lon: '13.405', place: 'Berlin' });
+      console.error(`geocoding WEATHER_PLACE "${WEATHER_PLACE}" failed, using Heidelberg:`, e.message);
+      return coordLoc({ lat: '49.4094', lon: '8.6946', place: 'Heidelberg' });
     }
   }
 
@@ -171,8 +171,11 @@ module.exports = function createWeather({ berlinDay }) {
   }
 
   // weatherForRequest is used by the digest and plan-day; cacheKeys backs /status.
+  // weatherCached is exposed for callers that already have a resolved loc
+  // (e.g. plan-cycling-training's start/destination) and want to skip a
+  // redundant geocode.
   return {
-    register, weatherForRequest, resolveLocation, geocodePlace,
+    register, weatherForRequest, resolveLocation, geocodePlace, weatherCached,
     cacheKeys: () => [...weatherCache.keys()],
   };
 };

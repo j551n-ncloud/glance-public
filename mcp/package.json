@@ -12,5 +12,15 @@
     "express": "^4.19.2",
     "jose": "^5.9.6",
     "zod": "^3.23.8"
+  },
+  "//overrides": [
+    "qs: CVE-2026-82417 and CVE-2026-82562, both fixed in 6.16.0.",
+    "express 4.22.2 pins qs to ~6.15.1 so it can never pick that up on its own,",
+    "while its own body-parser already declares ~6.16.0 - the two were resolving",
+    "to separate copies of qs in the same tree and only express's was vulnerable.",
+    "Forcing one 6.16.0 for both is the version body-parser already wanted."
+  ],
+  "overrides": {
+    "qs": "6.16.0"
   }
 }

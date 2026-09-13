@@ -20,7 +20,7 @@ services:
 
   glance:
     container_name: glance
-    image: glanceapp/glance
+    image: ghcr.io/j551n-ncloud/glance-reloaded:latest
     restart: unless-stopped
     volumes:
       - ./config:/app/config
@@ -34,7 +34,7 @@ services:
       - TZ=Europe/Berlin
       # Weather widget location (built-in weather widget). Set WEATHER_LOCATION
       # in .env to override; default keeps the dashboard working if it's unset.
-      - WEATHER_LOCATION=${WEATHER_LOCATION:-Berlin, Germany}
+      - WEATHER_LOCATION=${WEATHER_LOCATION:-Heidelberg, Germany}
     env_file: .env
     # Pin external DNS resolvers to avoid intermittent "context deadline
     # exceeded" timeouts when widgets (e.g. weather) call external APIs.
@@ -46,6 +46,18 @@ services:
 
   ics-proxy:
     container_name: ics-proxy
+    # Built and CVE-scanned by services/build, pushed to Harbor tagged with
+    # this repo's commit. Deploying the scanned artifact rather than
+    # rebuilding it here means the Trivy numbers in Harbor describe the
+    # image that is actually running - a second build on the target is a
+    # different artifact nobody scanned, and this Dockerfile deliberately
+    # tracks live apt mirrors, so two builds of one commit genuinely can
+    # differ. It also stops every deploy rebuilding ~500MB on the host.
+    #
+    # `build:` stays for local development (`docker compose up --build`,
+    # see CLAUDE.md); pull_policy makes the deployed path pull instead.
+    image: registry.home.example.com/library/glance-ics-proxy:${GLANCE_IMAGE_TAG:-latest}
+    pull_policy: always
     build: ./ics-proxy
     restart: unless-stopped
     volumes:
@@ -55,11 +67,20 @@ services:
       - ICS_URL=${ICS_URL}
       - ICS_USER=${ICS_USER:-}
       - ICS_PASS=${ICS_PASS:-}
+      # Separate Nextcloud task credentials, if different from ICS_USER/PASS
+      # above (config.js falls back to those when these are unset).
+      - TASKS_USER=${TASKS_USER:-}
+      - TASKS_PASS=${TASKS_PASS:-}
       - CAL_URL=${CAL_URL:-}
       - EWS_URL=${EWS_URL:-}
       - EWS_USER=${EWS_USER:-}
       - EWS_PASS=${EWS_PASS:-}
       - EWS_DOMAIN=${EWS_DOMAIN:-}
+      # ICS calendar-feed export (read-only Exchange-calendar subscription
+      # URL, e.g. for Nextcloud). Empty CALENDAR_FEED_TOKEN disables the route.
+      - CALENDAR_FEED_TOKEN=${CALENDAR_FEED_TOKEN:-}
+      - CALENDAR_FEED_PAST_DAYS=${CALENDAR_FEED_PAST_DAYS:-30}
+      - CALENDAR_FEED_FUTURE_DAYS=${CALENDAR_FEED_FUTURE_DAYS:-180}
       - TASKS_HOME_URL=${TASKS_HOME_URL:-}
       - TASKS_WORK_URL=${TASKS_WORK_URL:-}
       - CACHE_TTL_MS=${ICS_CACHE_TTL_MS:-300000}
@@ -74,6 +95,19 @@ services:
       - STRAVA_GOAL_RIDE_KM=${STRAVA_GOAL_RIDE_KM:-0}
       - STRAVA_GOAL_SWIM_KM=${STRAVA_GOAL_SWIM_KM:-0}
       - STRAVA_DB=${STRAVA_DB:-/data/strava.db}
+      # Garmin Connect (unofficial login, workout push only). Empty unless
+      # set; see README "Garmin setup".
+      - GARMIN_EMAIL=${GARMIN_EMAIL:-}
+      - GARMIN_PASSWORD=${GARMIN_PASSWORD:-}
+      - GARMIN_TOKENS_FILE=${GARMIN_TOKENS_FILE:-/data/garmin-tokens.json}
+      # Weather (Open-Meteo, no key). Empty unless set; falls back to
+      # Heidelberg. A saved default (set via POST /weather/location) still
+      # wins over these at request time.
+      - WEATHER_LAT=${WEATHER_LAT:-}
+      - WEATHER_LON=${WEATHER_LON:-}
+      - WEATHER_PLACE=${WEATHER_PLACE:-}
+      - WEATHER_TZ=${WEATHER_TZ:-}
+      - WEATHER_CACHE_TTL_MS=${WEATHER_CACHE_TTL_MS:-1800000}
       # Daily email digest (disabled unless DIGEST_ENABLED=true)
       - DIGEST_ENABLED=${DIGEST_ENABLED:-false}
       - DIGEST_TO=${DIGEST_TO:-}
@@ -89,14 +123,49 @@ services:
       - SMTP_USER=${SMTP_USER:-}
       - SMTP_PASS=${SMTP_PASS:-}
       - SMTP_FROM=${SMTP_FROM:-}
+      # Push notifications (ntfy.sh or self-hosted). Empty NTFY_TOPIC disables it.
+      - NTFY_URL=${NTFY_URL:-https://ntfy.sh}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
+      - NTFY_TOKEN=${NTFY_TOKEN:-}
+      # SiYuan Note (read-only RAG search). Empty disables it.
+      - SIYUAN_URL=${SIYUAN_URL:-}
+      - SIYUAN_TOKEN=${SIYUAN_TOKEN:-}
+      - SIYUAN_NOTEBOOK_NAME=${SIYUAN_NOTEBOOK_NAME:-RAG}
+      # Semantic search over the RAG notebook. Local on-device model by
+      # default (no external API); set EMBEDDINGS_REMOTE_URL to instead use
+      # an OpenAI-compatible /embeddings endpoint (note content IS sent
+      # there — opt-in). Only active if SiYuan is configured above.
+      - EMBEDDINGS_DB=${EMBEDDINGS_DB:-/data/embeddings.db}
+      - EMBEDDINGS_MODEL=${EMBEDDINGS_MODEL:-Xenova/multilingual-e5-small}
+      - EMBEDDINGS_MODEL_CACHE=${EMBEDDINGS_MODEL_CACHE:-/data/models}
+      - EMBEDDINGS_REMOTE_URL=${EMBEDDINGS_REMOTE_URL:-}
+      - EMBEDDINGS_REMOTE_API_KEY=${EMBEDDINGS_REMOTE_API_KEY:-}
+      - EMBEDDINGS_REMOTE_MODEL=${EMBEDDINGS_REMOTE_MODEL:-alias-embeddings}
+      # Cosine-similarity floor below which semantic-search/hybrid-search
+      # matches are dropped as noise. See lib/embeddings.js semanticSearch.
+      - EMBEDDINGS_MIN_SCORE=${EMBEDDINGS_MIN_SCORE:-0.86}
     dns:
       - 1.1.1.1
       - 8.8.8.8
     expose:
       - "3000"
+    # Hard cgroup CPU ceiling, not just a soft priority hint: this container
+    # runs occasional CPU-bound bursts (local embeddings model inference)
+    # that would otherwise happily grab every core on the host. On the
+    # shared PVE box that shares ~3 cores with a dozen other containers,
+    # an uncapped burst drove the CPU package to 100°C (thermal_zone4).
+    # Capped below the host's total core count on both hosts so this
+    # container can never again monopolize every core during a backfill.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
 
   mcp:
     container_name: mcp
+    # Same as ics-proxy above - Harbor's scanned artifact, not a rebuild.
+    image: registry.home.example.com/library/glance-mcp:${GLANCE_IMAGE_TAG:-latest}
+    pull_policy: always
     build: ./mcp
     restart: unless-stopped
     environment:
@@ -109,6 +178,19 @@ services:
       - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
       - PUBLIC_BASE=${PUBLIC_BASE:-}
       - MCP_RESOURCE=${MCP_RESOURCE:-}
+      # openGym bridge (optional, see server.js "openGym bridge" comment). Empty/missing
+      # mounts just disable the gym_* tools rather than crashing the whole service.
+      - OPENGYM_ROOT=/app/opengym
+      - OPENGYM_DATA=/app/opengym/data
+      - OPENGYM_UID=${GYM_MCP_UID:-}
+    volumes:
+      # Read-only: mounted at /app/opengym so tools.js's bare `zod` import resolves by
+      # walking up to this container's own /app/node_modules (see server.js comment).
+      # Three targeted mounts instead of the whole ./openGym tree, so this container never
+      # sees the ~140MB exercise media, openGym's own .git, or its node_modules.
+      - ./openGym/mcp/src:/app/opengym/mcp/src:ro
+      - ./openGym/frontend/src/lib:/app/opengym/frontend/src/lib:ro
+      - ./openGym/data:/app/opengym/data:ro
     dns:
       - 1.1.1.1
       - 8.8.8.8
@@ -116,3 +198,90 @@ services:
       - "3001"
     depends_on:
       - ics-proxy
+
+  # ---- openGym: self-hosted gym/body-weight tracker (./openGym, a separate upstream repo
+  # cloned in place — gitea.com/DuarteSantos/openGym) --------------------------------------
+  # Deliberately NOT routed through the shared nginx above. openGym signs in with passkeys
+  # (WebAuthn), which bind to one exact hostname (RP_ID) served over one origin — its own
+  # web container already terminates that origin (SPA + /api on the same origin, which
+  # passkeys require). Folding it under dash.example.com/some-path would fight both of those:
+  # the app's own absolute /api/* calls would collide with this stack's own /api/sse/, and
+  # RP_ID would have to become dash.example.com's hostname regardless of path. Instead it gets
+  # its own port here (GYM_WEB_PORT) and, to reach it from a phone over HTTPS, its own
+  # hostname in front (e.g. a second Cloudflare Tunnel route) — see
+  # openGym/docs/SELF_HOSTING.md sections 3 and 5, and CLAUDE.md.
+  opengym-media:
+    container_name: opengym-media
+    image: alpine/git
+    volumes:
+      - ./openGym/media/img:/out/img
+      - ./openGym/media/gif:/out/gif
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$(ls -A /out/img 2>/dev/null)" ]; then
+          echo "openGym: downloading exercise media (~140MB, one time)..."
+          git clone --depth 1 https://github.com/hasaneyldrm/exercises-dataset /tmp/ds
+          cp /tmp/ds/images/*.jpg /out/img/ && cp /tmp/ds/videos/*.gif /out/gif/
+          echo "openGym: media ready."
+        else
+          echo "openGym: media already present, skipping."
+        fi
+    restart: "no"
+
+  opengym-api:
+    container_name: opengym-api
+    # Upstream publishes prebuilt images now, so this no longer builds on
+    # the target either - the same change made for ics-proxy and mcp
+    # above, for the same reason. Pinned, not :latest, so what runs is a
+    # property of this file rather than of whenever it was last pulled.
+    #
+    # NOTE: this one owns a database (./openGym/data). Moving the pin
+    # across releases can mean migrations - read upstream's notes before
+    # bumping it, unlike the two services above where a bump is just new
+    # bytes.
+    image: registry.gitlab.com/duartesantos8/opengym/api:${GYM_IMAGE_TAG:-1.3.5}
+    pull_policy: always
+    build: ./openGym/api
+    restart: unless-stopped
+    environment:
+      - PORT=3000
+      - DATA_DIR=/data
+      - RP_ID=${GYM_RP_ID:-localhost}
+      - ORIGIN=${GYM_ORIGIN:-http://localhost:8090}
+      - RP_NAME=${GYM_RP_NAME:-openGym}
+      - SESSION_DAYS=${GYM_SESSION_DAYS:-90}
+      - ADMIN_UIDS=${GYM_ADMIN_UIDS:-}
+      - INVITE_ONLY=${GYM_INVITE_ONLY:-}
+      - ALLOW_GUEST=${GYM_ALLOW_GUEST:-}
+      - AUDIT_IP=${GYM_AUDIT_IP:-off}
+      - VAPID_SUBJECT=${GYM_VAPID_SUBJECT:-}
+    volumes:
+      - ./openGym/data:/data
+    expose:
+      - "3000"
+
+  opengym-web:
+    container_name: opengym-web
+    # Same as opengym-api - both come from one upstream tag.
+    image: registry.gitlab.com/duartesantos8/opengym/web:${GYM_IMAGE_TAG:-1.3.5}
+    pull_policy: always
+    build:
+      context: ./openGym
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      opengym-media:
+        condition: service_completed_successfully
+      opengym-api:
+        condition: service_started
+    # Own host port, not behind the shared nginx — see the comment above this block.
+    ports:
+      - "${GYM_WEB_PORT:-8090}:${GYM_NGINX_PORT:-80}"
+    environment:
+      - NGINX_PORT=${GYM_NGINX_PORT:-80}
+      - BACKEND=opengym-api
+      - PORT=3000
+    volumes:
+      - ./openGym/media/img:/usr/share/nginx/html/img:ro
+      - ./openGym/media/gif:/usr/share/nginx/html/gif:ro

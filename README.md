@@ -31,6 +31,7 @@ flowchart LR
     ews["Exchange (EWS / NTLM)"]
     ncloud["Nextcloud (ICS / CalDAV)"]
     strava["Strava API (OAuth)"]
+    garmin["Garmin Connect<br/>(unofficial login)"]
     spotify["Spotify API (OAuth)"]
     smtp["SMTP (digests)"]
   end
@@ -38,7 +39,7 @@ flowchart LR
   phone["iPhone<br/>Health Auto Export"]
 
   client -->|"/"| nginx
-  client -->|"/ews-api/ /tasks-api/ /strava-api/ /health-api/<br/>X-Api-Token"| nginx
+  client -->|"/ews-api/ /tasks-api/ /strava-api/ /health-api/ /garmin-api/<br/>X-Api-Token"| nginx
   client -->|"/mcp (X-Api-Token)"| nginx
   nginx --> glance
   nginx --> proxy
@@ -50,6 +51,7 @@ flowchart LR
   proxy --> ews
   proxy --> ncloud
   proxy --> strava
+  proxy --> garmin
   proxy --> smtp
   glance --> spotify
 ```
@@ -58,13 +60,15 @@ flowchart LR
   endpoints directly over the Docker network, bypassing nginx, so they never need
   the token. The Spotify widget calls the Spotify API client-side.
 - **nginx**: reverse proxy and token gate. Routes `/ews-api/`, `/tasks-api/`,
-  `/strava-api/`, `/health-api/` to ics-proxy and `/mcp` to the MCP server. GET on
-  the API paths and all of `/mcp` require an `X-Api-Token`; POSTs are token-checked
-  by ics-proxy itself (`/health-api/ingest` is passed through for the phone).
+  `/strava-api/`, `/health-api/`, `/garmin-api/` to ics-proxy and `/mcp` to the
+  MCP server. GET on the API paths and all of `/mcp` require an `X-Api-Token`;
+  POSTs are token-checked by ics-proxy itself (`/health-api/ingest` is passed
+  through for the phone).
 - **ics-proxy**: Node.js sidecar. Reads Exchange events (EWS/NTLM), Nextcloud
   events and tasks (ICS/CalDAV), Strava (OAuth), and ingests Apple Health; persists
   Strava + Health history in SQLite (`./data`); writes calendar/tasks via
-  token-protected POSTs; sends daily and weekly email digests.
+  token-protected POSTs; pushes structured workouts to Garmin Connect; sends
+  daily and weekly email digests.
 - **mcp**: remote MCP server (stateless Streamable HTTP) exposing the proxy as
   named tools at `/mcp`. See `mcp.md`.
 
@@ -83,6 +87,14 @@ and clubs. The proxy holds a Strava OAuth refresh token and mints short-lived
 access tokens on demand (same pattern as Spotify). Reads are cached generously to
 stay inside Strava's rate limits (100 reads / 15 min). Surfaced both as a Home
 dashboard widget and as MCP tools. Read-only: no write tools exist.
+
+**Garmin Connect** (write-only, token-protected): push a structured training
+session (warmup + intervals/recovery + cooldown, with heart-rate/power/pace
+targets) as a workout in the user's Garmin Connect library, optionally
+scheduled onto a calendar date so it syncs to the watch/head unit. Garmin has
+no public personal-use API, so the proxy logs in the same unofficial way the
+mobile app does (see "Garmin setup"). No reads: Strava already covers
+completed-activity data.
 
 **Writes** (`POST`, token-protected):
 
@@ -116,16 +128,10 @@ Configured by env, flagged high importance, scheduled with cron.
 
 ```bash
 git clone https://github.com/j551n-ncloud/glance-public.git
-cd glance-public
+cd glance
 ```
 
-### 2. Create `.env`
-
-```bash
-cp .env.example .env
-```
-
-Then fill in the values:
+### 2. Edit `.env`
 
 | Variable | Description |
 |---|---|
@@ -140,6 +146,7 @@ Then fill in the values:
 | `SPOTIFY_REFRESH` | Spotify OAuth2 refresh token |
 | `STRAVA_CLIENT_ID` / `STRAVA_CLIENT_SECRET` | Strava API app credentials (read-only; optional) |
 | `STRAVA_REFRESH_TOKEN` | Strava OAuth refresh token, scope `read,activity:read_all,profile:read_all` |
+| `GARMIN_EMAIL` / `GARMIN_PASSWORD` | Garmin Connect login (write-only workout push; optional). No MFA support — see "Garmin setup" |
 | `GLANCE_SECRET_KEY` | Glance session secret |
 | `GLANCE_PASSWORD_HASH` | Bcrypt hash of Glance login password |
 | `NEXTCLOUD_BTOA` | `base64("user:password")` for task creation |
@@ -179,46 +186,7 @@ Dashboard available at `http://localhost:8088`. Four containers come up: `nginx`
    https://<nextcloud>/remote.php/dav/calendars/<user>/<list-name>/?export
    ```
 
-## Refresh tokens (Spotify and Strava)
-
-Both integrations use the same OAuth pattern: a one-time browser authorization
-yields a long-lived **refresh token**, which goes in `.env`. At runtime,
-short-lived access tokens are minted from it automatically (the Spotify widget
-does this client-side on each load, the proxy does it server-side for Strava),
-so you never have to repeat the browser step unless you revoke access.
-
-### Spotify setup (optional)
-
-The Spotify widget needs a refresh token with playback scopes:
-
-1. Create an app at https://developer.spotify.com/dashboard. Add
-   `http://127.0.0.1:8888/callback` as a **Redirect URI**. Note the Client ID
-   and Client Secret.
-2. Authorize once in a browser, substituting your client id:
-   ```
-   https://accounts.spotify.com/authorize?client_id=<CLIENT_ID>&response_type=code&redirect_uri=http://127.0.0.1:8888/callback&scope=user-read-playback-state%20user-modify-playback-state
-   ```
-   The redirect to `http://127.0.0.1:8888/callback?code=XXXX` shows a browser
-   error (nothing runs there); copy the `code` from the address bar. The code
-   expires after a few minutes, so do step 3 right away.
-3. Exchange the code for a refresh token:
-   ```bash
-   curl -s -X POST https://accounts.spotify.com/api/token \
-     -H "Authorization: Basic $(printf '%s' '<CLIENT_ID>:<CLIENT_SECRET>' | base64)" \
-     -d grant_type=authorization_code -d code=<CODE> \
-     -d redirect_uri=http://127.0.0.1:8888/callback | jq -r .refresh_token
-   ```
-4. Fill in `.env`:
-   ```bash
-   SPOTIFY_BTOA=$(printf '%s' '<CLIENT_ID>:<CLIENT_SECRET>' | base64)
-   SPOTIFY_REFRESH=<refresh token from step 3>
-   ```
-5. Restart Glance: `docker compose up -d --build glance`.
-
-Spotify refresh tokens do not rotate on use; they stay valid until you revoke
-the app under https://www.spotify.com/account/apps/.
-
-### Strava setup (optional, read-only)
+## Strava setup (optional, read-only)
 
 One-time OAuth to obtain a refresh token with the activity scope:
 
@@ -246,8 +214,27 @@ One-time OAuth to obtain a refresh token with the activity scope:
 
 The proxy refreshes access tokens automatically. If Strava ever rotates the
 refresh token, ics-proxy logs the new value (`Strava rotated the refresh
-token...`); update `.env` with it. (This differs from Spotify, whose refresh
-tokens never rotate.)
+token...`); update `.env` with it.
+
+## Garmin setup (optional, write-only)
+
+Garmin has no public personal-use API, so `ics-proxy` logs in the same
+unofficial way the mobile app does (via the `garmin-connect` npm package —
+see `ics-proxy/lib/garmin.js`).
+
+1. Put `GARMIN_EMAIL` and `GARMIN_PASSWORD` in `.env`, then
+   `docker compose up -d --build ics-proxy mcp` (and `--force-recreate nginx`
+   if the `/garmin-api/` route is new).
+2. That's it — the proxy logs in on first use and caches the session to
+   `GARMIN_TOKENS_FILE` (default `/data/garmin-tokens.json`, on the
+   persistent volume) so it doesn't need to log in again on every restart.
+
+**MFA note**: this only works if the Garmin account has no MFA (two-factor)
+enabled — the login library has no MFA support at all. If MFA is ever turned
+on for this account, login breaks with a clear error; re-enabling it needs a
+different bootstrap (e.g. minting OAuth tokens once via Python's `garth`,
+which does handle MFA, then loading them into `GARMIN_TOKENS_FILE`) rather
+than a `.env` change.
 
 ## API & MCP access
 
@@ -266,15 +253,11 @@ private and serve `/mcp` over HTTPS in production.
 - **MCP server (tools, registration, remote):** `mcp.md`
 
 The MCP server is reachable locally at `http://localhost:8088/mcp` and remotely at
-`https://dash.example.com/mcp`. It exposes 30 tools. Calendar, tasks and directory (20):
-`list_events`, `list_ics_events`, `list_tasks`, `create_task`, `complete_task`,
-`rename_task`, `create_event`, `create_meeting`, `delete_meeting`, `reschedule_meeting`, `search_attendees`,
-`search_directory`, `get_agenda`, `find_free_slots`, `search`, `delete_event`,
-`reschedule_event`, `update_event`, `delete_task`, `set_task_dates`.
-Strava, read-only (10): `list_strava_activities`,
-`get_strava_athlete`, `get_strava_zones`, `get_strava_gear`,
-`get_strava_activity`, `get_strava_streams`, `get_strava_clubs`,
-`get_strava_ytd`, `get_strava_load`, `get_strava_series`.
+`https://dash.example.com/mcp`. It covers calendar, tasks, directory lookup, Deck
+(kanban), bike maintenance, Strava, Apple Health, cycling-training planning, and
+SiYuan notes — see `CLAUDE.md`'s "MCP server" section for the full, current tool
+list (kept there rather than duplicated here, since a second copy just drifts
+out of date as tools are added).
 
 ### Registering the MCP in Claude Code
 

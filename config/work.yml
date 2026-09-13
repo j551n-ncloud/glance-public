@@ -6,7 +6,7 @@
           hour-format: 24h
           timezones:
             - timezone: Europe/Berlin
-              label: Berlin
+              label: Heidelberg
 
         - type: custom-api
           title: Termine
@@ -65,10 +65,10 @@
                 - title: IPAM
                   url: https://ipam.intra.example.com/ui/
                 - title: CheckMK
-                  url: https://checkmk.intra.example.com
-                - title: pve01
-                  url: https://pve01.intra.example.com
-                - title: admin01
+                  url: https://monitor.intra.example.com/mysite/check_mk/login.py
+                - title: pve01.intra.example.com
+                  url: https://pve01.intra.example.com/
+                - title: admin01.intra.example.com
                   url: ssh://user@admin01.intra.example.com
 
             - title: Resources
@@ -76,7 +76,7 @@
                 - title: Wiki
                   url: https://wiki.intra.example.com
                 - title: IT Support
-                  url: https://itsupport.intra.example.com
+                  url: https://itsupport.intra.example.com/
 
         - type: custom-api
           title: Pomodoro
@@ -114,6 +114,46 @@
             <div id="workday-text" style="font-size:0.8rem; color:var(--color-text-subdue); margin-top:5px; text-align:center;"></div>
             <img src="x" onerror="(function(){function u(){var now=new Date(),s=8*60,e=16*60,c=now.getHours()*60+now.getMinutes(),t=e-s,el=Math.max(0,Math.min(c-s,t)),pct=Math.round(el/t*100),rem=Math.max(0,e-c),bar=document.getElementById('workday-bar'),txt=document.getElementById('workday-text'),pctEl=document.getElementById('workday-pct');if(!bar||!txt||!pctEl)return;bar.style.width=pct+'%';if(pct<50)bar.style.background='var(--color-positive)';else if(pct<80)bar.style.background='var(--color-primary)';else bar.style.background='var(--color-negative)';pctEl.textContent=pct+'%';if(c>=e){txt.textContent='Feierabend!';}else if(c<s){var w=s-c;txt.textContent='Beginnt in '+(w>=60?Math.floor(w/60)+'h ':'')+w%60+'m';}else{var h=Math.floor(rem/60),m=rem%60;txt.textContent=(h>0?h+'h ':'')+m+'m verbleibend';}}u();setInterval(u,60000);this.remove();})();" style="display:none">
 
+        # Test: Nextcloud Deck cards (read-only), placed right under Arbeitstag.
+        - type: custom-api
+          title: Deck
+          cache: 1d
+          url: http://ics-proxy:3000/deck/cards
+          template: |
+            <div data-deck-cards="1">
+              <p class="color-muted">Lade…</p>
+            </div>
+            <img src="x" onerror="(function(){
+              var TOKEN='${API_TOKEN}';
+              var root=document.querySelector('[data-deck-cards]');
+              if(!root) return;
+              function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+              function render(cards){
+                var open=(cards||[]).filter(function(c){return c.stack!=='Erledigt';});
+                if(!open.length){ root.innerHTML='<p class=\'color-muted\'>Keine offenen Karten.</p>'; return; }
+                root.innerHTML='<ul class=\'list list-gap-10\' style=\'max-height:260px; overflow-y:auto; padding-right:4px;\'>'+
+                  open.map(function(c){
+                    var cl=c.checklist||{done:0,total:0};
+                    var bar='';
+                    if(cl.total>0){
+                      var pct=Math.round(cl.done*100/cl.total);
+                      bar='<div class=\'size-h6 color-muted\' style=\'margin-top:2px;\'>'+cl.done+'/'+cl.total+' Unterpunkte</div>'+
+                        '<div style=\'background:var(--color-widget-content-border); border-radius:4px; height:8px; overflow:hidden; margin-top:2px;\'>'+
+                          '<div style=\'height:100%; width:'+pct+'%; border-radius:4px; background:var(--color-primary);\'></div>'+
+                        '</div>';
+                    }
+                    var due=c.due?('<div class=\'size-h6\'>Fällig: '+esc(c.due)+'</div>'):'';
+                    return '<li>'+
+                      '<div class=\'size-h4\'>'+esc(c.title)+'</div>'+
+                      '<div class=\'size-h6 color-muted\'>'+esc(c.board)+' &middot; '+esc(c.stack)+'</div>'+
+                      bar+due+
+                    '</li>';
+                  }).join('')+
+                '</ul>';
+              }
+              fetch('/deck-api/cards',{headers:{'X-Api-Token':TOKEN}}).then(function(r){return r.json();}).then(render).catch(function(e){root.textContent='Fehler: '+(e.message||e);});
+            })();" style="display:none">
+
     - size: small
       widgets:
         - type: custom-api
@@ -131,8 +171,9 @@
                       onchange="(async function(el){
                         if(!el.checked) return;
                         el.disabled=true;
+                        const li = el.closest('li');
                         await fetch('/tasks-api/complete-work-task',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({uid:'{{ .String "uid" }}'})});
-                        setTimeout(()=>location.reload(),500);
+                        if (li) { li.style.transition='opacity .2s'; li.style.opacity='0'; setTimeout(()=>li.remove(),200); }
                       })(this)">
                     <div>
                       <div class="size-h4">{{ .String "title" }}</div>
@@ -147,7 +188,7 @@
                 {{ end }}
               </ul>
             {{ end }}
-            <form style="display:flex; flex-direction:column; gap:6px; margin-top:10px;"
+            <form data-todo-form="work" style="display:flex; flex-direction:column; gap:6px; margin-top:10px;"
               onsubmit="(async function(e){
                 e.preventDefault();
                 const f = e.target;
@@ -157,7 +198,9 @@
                 const endDate = f.querySelector('input[name=endDate]').value || null;
                 await fetch('/tasks-api/work-tasks',{method:'POST',headers:{'Content-Type':'application/json','X-Api-Token':'${API_TOKEN}'},body:JSON.stringify({title,startDate,endDate})});
                 f.reset();
-                setTimeout(()=>location.reload(),500);
+                ['work-todo-title','work-todo-startDate','work-todo-endDate','work-todo-focus'].forEach(k=>localStorage.removeItem(k));
+                // No reload: this widget's own cache (15s) plus the live
+                // update stream will bring the new task in on its own.
               })(event)">
               <div style="display:flex; gap:6px;">
                 <input name="title" type="text" placeholder="Aufgabe hinzufügen…" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
@@ -168,6 +211,21 @@
                 <input name="endDate" type="date" style="flex:1; background:var(--color-widget-background); border:1px solid var(--color-widget-content-border); border-radius:4px; padding:4px 8px; color:inherit; font-size:inherit;">
               </div>
             </form>
+            <!-- Glance's live updates morph this widget's HTML via Idiomorph
+                 (not a plain innerHTML swap), and Idiomorph forces an
+                 <input>'s live value back to empty whenever the freshly
+                 rendered server HTML has no `value` attribute — which ours
+                 never does, regardless of focus (Glance's morph call doesn't
+                 pass Idiomorph's `ignoreActiveValue` option). This happens on
+                 every live update, not just the 15s cache refresh. A one-shot
+                 restore (e.g. img-onerror alone) isn't enough since it only
+                 fires once at page load; this installs a small recurring
+                 poll that re-fills the field from localStorage whenever it
+                 gets wiped, using data-todo-form to always re-find the live
+                 form (in case Idiomorph ever replaces the node outright
+                 rather than just clearing its value). Draft is cleared on
+                 successful submit above. -->
+            <img src="x" onerror="(function(){if(window.__workTodoPoll)return;window.__workTodoPoll=true;var sel='form[data-todo-form=&quot;work&quot;]';var prefix='work-todo-';var fields=['title','startDate','endDate'];function bind(){var f=document.querySelector(sel);if(!f)return;fields.forEach(function(n){var el=f.querySelector('input[name=&quot;'+n+'&quot;]');if(!el||el.dataset.bound)return;el.dataset.bound='1';var k=prefix+n;var v=localStorage.getItem(k);if(v)el.value=v;el.addEventListener('input',function(){localStorage.setItem(k,this.value)});el.addEventListener('focus',function(){localStorage.setItem(prefix+'focus',n)});el.addEventListener('blur',function(){if(localStorage.getItem(prefix+'focus')===n)localStorage.removeItem(prefix+'focus')})})}bind();setInterval(function(){var f=document.querySelector(sel);if(!f)return;bind();fields.forEach(function(n){var el=f.querySelector('input[name=&quot;'+n+'&quot;]');if(!el)return;var saved=localStorage.getItem(prefix+n)||'';if(saved&&!el.value)el.value=saved});var af=localStorage.getItem(prefix+'focus');if(af&&document.activeElement===document.body){var el2=f.querySelector('input[name=&quot;'+af+'&quot;]');if(el2)el2.focus()}},300);this.remove()})();" style="display:none">
 
         - type: custom-api
           title: Spotify
@@ -244,12 +302,12 @@
                   {{ if and $isDeviceActive (not $isPrivateSession) }}
                     {{ if $isCurrentlyPlaying }}
                       <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
-                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/pause',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">⏸</button>
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/pause',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}});">⏸</button>
                         <p>{{ $deviceName }}</p>
                       </div>
                     {{ else }}
                       <div style="margin-right:10px; height: 100%; display: flex; flex-direction: column;">
-                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/play',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}}); setTimeout(function(){ location.reload(); }, 2000);">▶</button>
+                        <button style="font-size:25px;" onclick="fetch('https://api.spotify.com/v1/me/player/play',{method:'PUT',headers:{'Authorization':'Bearer {{$accessToken}}'}});">▶</button>
                         <p>{{ $deviceName }}</p>
                       </div>
                     {{ end }}
@@ -277,7 +335,6 @@
                               }
                             });
                           }
-                          setTimeout(() => location.reload(), 2000);
                         })()"
                       >
                         <div>

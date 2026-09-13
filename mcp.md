@@ -86,8 +86,24 @@ through (auth is enforced by the service).
 | `commit_day_plan` | `blocks:[{title,start,duration?\|end?,list?}]` | Write approved plan blocks as timed tasks (default list `home`). Confirm first. |
 | `triage_tasks` | `soonDays?` | Tasks with no due date, overdue, or due soon, across both lists. Read-only. |
 | `check_conflicts` | `start, end` | Events across both calendars overlapping a proposed slot. Call before creating a meeting. Read-only. |
-| `get_weather` | `date?` | Open-Meteo forecast for the user's location (Berlin default). Read-only. |
+| `check_duplicates` | `date?` or `from?, to?` | Events with the same title whose times overlap or sit within 15min of each other, across both calendars. Call for the affected date right after create/reschedule, before confirming success. Read-only. |
+| `get_weather` | `date?` | Open-Meteo forecast for the user's location (Heidelberg default). Read-only. |
 | `get_status` | – | Backend status: cache ages, last Strava sync, digest crons, last Health ingest, configured backends. Read-only. |
+| `coach_briefing` | `date?` | Data bundle for a training/day coaching read: readiness, load status, 8-week distance+effort+cadence trend, YTD sport totals, last 5 activities with real per-session detail (HR, watts, cadence, pace/speed, elevation, effort), the athlete's HR zone boundaries (Z1..Z5) + time-in-zone for the most recent HR-bearing activity, today's calendar load, task triage, weather, bike maintenance due. Facts + cheap derived numbers only, no narrative — write the actual coaching read yourself. Read-only. |
+
+Deck (Nextcloud kanban; writes need user confirmation):
+
+| Tool | Args | Effect |
+|---|---|---|
+| `list_deck_boards` | – | Non-archived boards `[{id,title,color}]`. Read-only. |
+| `get_deck_cards` | `dueDays?` | Open cards across all boards (excl. archived/done): `[{id,title,board,boardId,stack,stackId,due,labels}]`. `boardId`/`stackId` are what update/move need. `dueDays` limits to overdue + due within N days. Read-only. |
+| `list_deck_stacks` | `boardId` | Stacks (columns) of a board: `[{id,title,order}]`. Needed to place or move a card. Read-only. |
+| `create_deck_board` | `title, color?` | Create a board. New boards have no stacks. |
+| `create_deck_stack` | `boardId, title` | Create a stack (column) on a board. |
+| `create_deck_card` | `boardId, stackId, title, due?, description?` | Create a card. A due date puts it in the weekly digest. |
+| `update_deck_card` | `boardId, stackId, cardId, title?, description?, due?` | Update a card's title/description/due in place; only given fields change. |
+| `move_deck_card` | `boardId, cardId, toStackId, order?` | Move a card to a different stack, e.g. "move to Done". Moving into a done-flagged stack auto-marks it done (Deck's own behavior). |
+| `delete_deck_card` | `boardId, stackId, cardId` | Delete a card. Destructive. |
 
 Strava (read-only; require `STRAVA_*` configured, see README "Strava setup"):
 
@@ -97,21 +113,74 @@ Strava (read-only; require `STRAVA_*` configured, see README "Strava setup"):
 | `get_strava_athlete` | – | Athlete profile incl. bikes and shoes. |
 | `get_strava_zones` | – | Heart rate and power zones (and FTP). |
 | `get_strava_gear` | `id?` | Bikes and shoes; with `id`, full detail for one item. |
-| `get_strava_activity` | `id` | Detailed performance for one activity: HR/watts, calories, laps, segment/best efforts, PRs. |
+| `get_strava_activity` | `id` | Detailed performance for one activity: HR/watts/cadence, calories, effort, elevation range, location, gear, route (incl. decoded `route_latlng`), laps, segment efforts, PRs. Social counters and account/visibility flags omitted. |
 | `get_strava_streams` | `id, keys?, resolution?` | Time-series streams for one activity. |
+| `get_strava_activity_zones` | `id` | Time-in-zone distribution for one activity (HR zones, and power zones if it has watts) — minutes per zone, not just the average. |
 | `get_strava_clubs` | `clubId?` | Clubs the athlete belongs to; with `clubId`, that club's upcoming events. |
 | `get_strava_ytd` | – | Year-to-date totals per sport (Run/Ride/Swim) + goal progress. |
 | `get_strava_load` | – | Training load (acute:chronic workload ratio) with status. |
 | `get_readiness` | – | Readiness signal: hard/easy/rest recommendation from ACWR + resting HR/HRV/sleep + days since last activity. |
 | `get_load_vs_training` | `weeks?` | Per-week work-meeting hours vs training km/effort (last N weeks). |
 | `get_strava_series` | `metric, granularity?, from?, to?` | DB-backed time series (hr/effort/distance) by day/week/month or custom range. |
+| `plan_cycling_training` | `destination, start?, date?, durationMinutes?, distanceKm?, avgSpeedKmh?` | Weather-aware ride plan: forecast at both `start` (defaults to your saved home location) and `destination`, a packing list covering the worse of the two, and a carb/gel target. Duration/distance can be given, or estimated from the straight-line start→destination distance and your recent Strava pace. Returns `descriptionDraft` to pass to `create_event`. |
 
 Training plans and eligibility (present in Strava's own MCP) are not exposed:
 the public Strava API does not provide them.
 
+Garmin Connect (push-only structured workouts — no public Garmin API, so this
+drives the same unofficial login the mobile app uses; requires
+`GARMIN_EMAIL`/`GARMIN_PASSWORD` configured, see README "Garmin setup";
+writes need user confirmation):
+
+| Tool | Args | Effect |
+|---|---|---|
+| `create_garmin_workout` | `name, description?, sport?, steps, date?` | Create a structured training-session workout (warmup/interval/recovery/cooldown steps, one level of repeat blocks, heart-rate/power/pace targets — see `ics-proxy/lib/garmin.js` for the exact schema) in the user's Garmin Connect library. `sport` one of `running`/`cycling`/`walking` (default `cycling`). Pass `date` (`YYYY-MM-DD`) to also schedule it onto that day so it syncs to the watch/head unit. |
+| `list_garmin_workouts` | `limit?` | Workouts saved in the library: `[{workoutId,name,sport,updated}]`. Read-only. |
+| `schedule_garmin_workout` | `workoutId, date` | Schedule an existing workout onto a calendar date. |
+| `delete_garmin_workout` | `workoutId` | Delete a workout from the library. Destructive. |
+
+openGym (self-hosted gym/body-weight tracker, `../openGym` — a separate upstream repo, not
+part of this one; read-only, no confirmation needed, same as Strava). Bridged rather than
+reimplemented: these 8 tools ARE openGym's own MCP tools (`openGym/mcp/src/tools.js`),
+imported directly so the numbers match its Stats screen exactly (same pure functions as its
+React UI — 1RM estimation, muscle balance, progression). `docker-compose.yml` bind-mounts
+`openGym/mcp/src`, `openGym/frontend/src/lib` and `openGym/data` read-only into the `mcp`
+container for this; if `openGym/` isn't checked out (or those mounts are absent), the bridge
+logs a warning at startup and these tools simply don't appear — the rest of the server is
+unaffected. `GYM_MCP_UID` (`.env`) picks which openGym profile to answer for; empty
+auto-detects when there's exactly one. See `openGym/mcp/README.md` for the tools' own docs.
+
+| Tool | Args | Effect |
+|---|---|---|
+| `gym_list_routines` | – | Routines saved in the profile's plan (names + exercise counts). |
+| `gym_get_routine` | `routine_id` | Full sets/reps/weight prescription for one routine (id from `gym_list_routines`). |
+| `gym_get_week_plan` | – | The week's plan by weekday, including any date-specific override for today. |
+| `gym_list_workouts` | `from?, to?` (`YYYY-MM-DD`), `limit?` (default 25, max 200) | Recent sessions, newest first: date, sets done/planned, volume, duration, PRs. |
+| `gym_get_workout` | `date?` or `workout_id?` | Full set-by-set breakdown of one session. A date with two sessions returns both ids to pick from rather than guessing. |
+| `gym_get_bodyweight` | `from?, to?` (`YYYY-MM-DD`) | Weigh-ins with the latest weight, the goal line, and deltas vs goal. |
+| `gym_estimate_1rm` | `exercise_id?, formula?` (`epley`\|`brzycki`\|`lombardi`) | All-time best 1RM + trend for one exercise, or a PR table across all exercises if `exercise_id` is omitted. |
+| `gym_muscle_balance` | `period` (`week`\|`month`\|`all`, required) | Muscles trained in the period, ranked, naming the ones neglected. |
+
+SiYuan Note (RAG-style knowledge base, scoped to one dedicated notebook named
+`SIYUAN_NOTEBOOK_NAME`, default "RAG" — never the user's other notebooks):
+
+| Tool | Args | Effect |
+|---|---|---|
+| `list_notes` | – | Every note in the RAG notebook, including nested ones: `{docId,title,path}[]`. Read-only. |
+| `hybrid_search_notes` | `query, limit?` | Default search: fuses `search_notes` (full-text) and `semantic_search_notes` (embedding) results via reciprocal rank fusion, so an exact term and a paraphrased/conceptual match both surface. Returns `{docId,title,path?,heading?,snippet?,score}[]`. |
+| `search_notes` | `query, limit?` | Pure full-text search over the RAG notebook only, deduped to one result per note. Returns `{id,docId,title,path,snippet}[]`. |
+| `semantic_search_notes` | `query, limit?` | Pure meaning-based (embedding) search via a local model — finds conceptually related notes with no shared keywords, and matches across German/English. Weak matches (cosine similarity below a floor, `EMBEDDINGS_MIN_SCORE`) are dropped. Returns `{docId,title,score}[]`. |
+| `get_note` | `docId` | Full markdown content of one note. Rejects ids outside the RAG notebook. |
+| `create_note` | `title, markdown?, parentDocId?` | Create a note in the RAG notebook. Rejects if the exact title already exists. `parentDocId` nests it under an existing note; omit for the notebook root. Returns `{docId}`. |
+| `update_note` | `docId, markdown, title?, mode?` | `mode:"replace"` (default) overwrites the whole body; `mode:"append"` adds to the end instead. Optional `title` also renames it. Rejects ids outside the RAG notebook. |
+| `move_note` | `docId, parentDocId?` | Move/reparent a note under another existing note; omit `parentDocId` to move it to the notebook root. Rejects ids outside the RAG notebook. |
+| `get_note_attrs` | `docId` | Get a note's built-in metadata plus any `custom-*` key/value tags. Read-only. Rejects ids outside the RAG notebook. |
+| `set_note_attrs` | `docId, attrs` | Set custom key/value tags on a note; keys auto-prefixed `custom-`. Rejects ids outside the RAG notebook. |
+| `delete_note` | `docId` | Delete a note. Rejects ids outside the RAG notebook. |
+
 **Write safety:** always confirm the exact arguments with the user before calling
-any write tool (`create_*`, `complete_*`, `rename_*`). `create_meeting` with
-attendees emails real people.
+any write tool (`create_*`, `complete_*`, `rename_*`, `update_*`, `move_*`, `delete_*`).
+`create_meeting` with attendees emails real people.
 
 ## Running
 
@@ -128,8 +197,8 @@ docker compose up -d --build mcp
 ```
 
 Env (set in `docker-compose.yml`): `PROXY_URL`, `API_TOKEN`, `PORT` (3001),
-`TZ`. The Strava tools just call ics-proxy's `/strava/*` routes, so the Strava
-credentials live on `ics-proxy`, not here.
+`TZ`. The Strava and Garmin tools just call ics-proxy's `/strava/*` and
+`/garmin/*` routes, so those credentials live on `ics-proxy`, not here.
 
 ## Registering in Claude Code
 
