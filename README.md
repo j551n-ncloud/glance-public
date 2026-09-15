@@ -1,4 +1,4 @@
-# Glance Dashboard
+# Tri-Stack
 
 Personal dashboard built with [Glance](https://github.com/glanceapp/glance),
 served via nginx with a custom `ics-proxy` sidecar and an MCP server. The proxy
