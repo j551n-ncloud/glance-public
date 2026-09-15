@@ -14,6 +14,33 @@ also sends a daily email digest. See `CLAUDE.md` (operational runbook) and
 - **Strava**: 30-activity summary, year-to-date goals, HR zones, training load (ACWR), interactive charts (HR / Relative Effort / distance), zone distribution, recent activities
 - **Health**: Apple Health summary (sleep, resting HR, HRV, steps, energy, nutrition) plus daily trend charts, fed by Health Auto Export
 
+## Screenshots
+
+**Home**: clock, Nextcloud calendar, weather, bookmarks, service status, Spotify,
+server stats, to-do.
+
+![Home page](pictures/home.png)
+
+**Work**: Exchange calendar (EWS), work bookmarks, Pomodoro timer, Arbeitstag
+progress, Deck cards, work to-do.
+
+![Work page](pictures/work.png)
+
+**Strava**: training load (ACWR), year-to-date goals, HR zone distribution,
+interactive HR / relative-effort charts, bike maintenance, readiness.
+
+![Strava page](pictures/strava.png)
+
+**Health**: Apple Health summary plus daily trend charts for sleep, resting HR,
+HRV, active energy, weight and steps, fed by Health Auto Export.
+
+![Health page](pictures/health.png)
+
+**Daily email digest**: today's weather, events, yesterday's Strava training and
+open tasks, sent every morning via SMTP.
+
+![Daily email digest](pictures/daily-digest.png)
+
 ## Architecture
 
 ```mermaid
